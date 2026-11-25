@@ -42,6 +42,8 @@ local SNAP=16                   -- tile snapping and padding: rebuilds only when
 local BIAS=0.25                 -- lift above the receiving face against z-fighting
 local neutralTone=Vector(1,1,1)
 local BUILDS_PER_FRAME=4        -- nearest casters first; the rest build on later frames
+local MAX_ROCK_SHADOWS=24
+local ROCK_SHADOW_LEVELS=4
 -- Like the engine: any model entity casts unless it disabled its shadow
 -- (DrawShadow(false) sets EF_NOSHADOW). These never cast on their own.
 local SKIP_CLASSES={viewmodel=true,gmod_hands=true,predicted_viewmodel=true,
@@ -94,13 +96,10 @@ function G.WallShadowPrisms(groups,direction,reach,emit)
     end
 end
 
-local function wallShadowVolume(ent,direction,reach)
-    local bundle=ent.RenderBundle
-    if not bundle or not ent.RenderTriangles then return end
+local function shadowVolume(ent,bundle,triangles,size,direction,reach)
     local localDirection=ent:WorldToLocal(ent:GetPos()+direction):GetNormalized()
     local old=bundle.shadowVolume
     if old and old.reach==reach and old.direction:DistToSqr(localDirection)<.000025 then return old.meshes end
-    local size=ent.High-ent.Low
     local depth=math.abs(localDirection.x)*size.x+math.abs(localDirection.y)*size.y+math.abs(localDirection.z)*size.z
     local meshes,positions={},{}
     local function flush()
@@ -116,7 +115,7 @@ local function wallShadowVolume(ent,direction,reach)
         meshes[#meshes+1]=result
         positions={}
     end
-    G.WallShadowPrisms(ent.RenderTriangles,localDirection,reach+depth,function(...)
+    G.WallShadowPrisms(triangles,localDirection,reach+depth,function(...)
         for i=1,24 do positions[#positions+1]=select(i,...) end
         if #positions>=60000 then flush() end
     end)
@@ -126,22 +125,7 @@ local function wallShadowVolume(ent,direction,reach)
     return meshes
 end
 
-local function drawWallShadows()
-    local eye=EyePos()
-    local direction=GetGlobal2Vector('RFGeoModShadowDir',Vector(0,0,-1)):GetNormalized()
-    if direction:LengthSqr()<.5 then return end
-    local reach=GetGlobal2Float('RFGeoModShadowDistance',50)*FADE_SCALE
-    local shade=math.Clamp(255-GetGlobal2Float('RFGeoModShadowColor',64),0,217)
-    if reach<=0 or shade<=0 then return end
-    local draws,walls={},{}
-    for _,ent in ipairs(ents.FindByClass('rf_geomod_dynamic')) do
-        if ent.RenderBundle and not ent:IsDormant() and not ent:GetNoDraw() and ent:GetPos():DistToSqr(eye)<RANGE*RANGE then
-            local matrix=ent:GetWorldTransformMatrix()
-            walls[#walls+1]={ent=ent,matrix=matrix}
-            local meshes=wallShadowVolume(ent,direction,reach)
-            if meshes and #meshes>0 then draws[#draws+1]={meshes=meshes,matrix=matrix} end
-        end
-    end
+local function drawVolumeShadows(draws,walls,shade)
     if #draws==0 then return end
     render.ClearStencil()
     render.SetStencilEnable(true)
@@ -189,6 +173,54 @@ local function drawWallShadows()
     cam.End2D()
     render.SetStencilEnable(false)
     render.ClearStencil()
+end
+
+local function drawGeoModShadows()
+    local eye=EyePos()
+    local direction=GetGlobal2Vector('RFGeoModShadowDir',Vector(0,0,-1)):GetNormalized()
+    if direction:LengthSqr()<.5 then return end
+    local reach=GetGlobal2Float('RFGeoModShadowDistance',50)*FADE_SCALE
+    local shade=math.Clamp(255-GetGlobal2Float('RFGeoModShadowColor',64),0,217)
+    if reach<=0 or shade<=0 then return end
+    local draws,walls={},{}
+    for _,ent in ipairs(ents.FindByClass('rf_geomod_dynamic')) do
+        if ent.RenderBundle and ent.RenderTriangles and not ent:IsDormant() and not ent:GetNoDraw()
+            and ent:GetPos():DistToSqr(eye)<RANGE*RANGE then
+            local matrix=ent:GetWorldTransformMatrix()
+            walls[#walls+1]={ent=ent,matrix=matrix}
+            local meshes=shadowVolume(ent,ent.RenderBundle,ent.RenderTriangles,ent.High-ent.Low,direction,reach)
+            if #meshes>0 then draws[#draws+1]={meshes=meshes,matrix=matrix} end
+        end
+    end
+    drawVolumeShadows(draws,walls,shade)
+
+    local rocks,batches={},{}
+    for _,ent in ipairs(ents.FindByClass('rf_geomod_debris')) do
+        local dist=ent:GetPos():DistToSqr(eye)
+        if not ent:IsDormant() and not ent:GetNoDraw() and dist<RANGE*RANGE then
+            local level=math.Round(ent:GetRockOpacity()*ROCK_SHADOW_LEVELS)
+            if level>0 then rocks[#rocks+1]={ent=ent,dist=dist,level=level} end
+        end
+    end
+    table.sort(rocks,function(a,b) return a.dist<b.dist end)
+    -- Combine similar opacities, so the number of stencil passes stays
+    -- bounded even when a large break spawns many rocks at once.
+    for i=1,math.min(#rocks,MAX_ROCK_SHADOWS) do
+        local rock=rocks[i]
+        local ent=rock.ent
+        local geometry=ent:GetRockShadowGeometry()
+        if geometry then
+            local meshes=shadowVolume(ent,geometry,geometry.triangles,geometry.size,direction,reach)
+            if #meshes>0 then
+                local batch=batches[rock.level] or {}
+                batches[rock.level]=batch
+                batch[#batch+1]={meshes=meshes,matrix=ent:GetWorldTransformMatrix()}
+            end
+        end
+    end
+    for level=1,ROCK_SHADOW_LEVELS do
+        if batches[level] then drawVolumeShadows(batches[level],{},shade*level/ROCK_SHADOW_LEVELS) end
+    end
 end
 local supersample=CreateClientConVar('rf_geomod_shadows_supersample','1',true,false,'Anti-alias GeoMod shadow edges (2x2 supersampling).',0,1)
 local CELL,atlas,projected,scratch,scratchMaterial
@@ -761,7 +793,7 @@ end)
 hook.Add('PostDrawOpaqueRenderables','rf_geomod_shadows',function(depth,_,sky3d)
     if depth or sky3d then return end
     if enabled:GetBool() and (not rShadows or rShadows:GetBool()) and not GetGlobal2Bool('RFGeoModShadowDisabled',false) then
-        drawWallShadows()
+        drawGeoModShadows()
     end
     if #active==0 then return end
     render.SetMaterial(projected)

@@ -36,7 +36,7 @@ end)
 
 local maxChunks=CreateConVar('rf_geomod_max_chunks','48',FCVAR_ARCHIVE,
     'Maximum live detached GeoMod chunks; further detached parts become temporary rocks.',0,256)
--- Detached parts smaller than this (cubic units) shatter into temporary rocks.
+-- Broken parts smaller than this (cubic units) shatter into temporary rocks.
 local MIN_CHUNK_VOLUME=1000
 local MAX_CHUNKS_PER_SPLIT=8
 G.Chunks=G.Chunks or {}
@@ -239,6 +239,10 @@ function ENT:CutContact(point,normal,radius,fracture)
     return self:QueueCarve(position,direction,radius,nil,nil,nil,op,sourceDirection)
 end
 
+function ENT:PhysicsCollide(data)
+    G.HandlePhysicsImpact(self,data)
+end
+
 function ENT:PlanCut(pieces,request,checkpoint)
     local position,normal=request.position,request.normal
     local op=request.contact
@@ -266,8 +270,14 @@ function ENT:PlanCut(pieces,request,checkpoint)
     local extracted=request.fracture and {}
     local remaining,err=G.SubtractCut(pieces,op,checkpoint,extracted)
     if not remaining then return nil,'complexity_limit',err end
-    local removed=G.Volume(pieces)-G.Volume(remaining)
+    local remainingVolume=G.Volume(remaining)
+    local removed=G.Volume(pieces)-remainingVolume
     if removed<.1 then return nil,'no_volume_removed' end
+    if self:IsDynamicWall() and remainingVolume<MIN_CHUNK_VOLUME then
+        -- No collider or solid fragments for a remnant below the chunk limit.
+        remaining,extracted={},nil
+        removed=removed+remainingVolume
+    end
     local hulls,failure=self:PrepareCollision(remaining,checkpoint)
     if not hulls then return nil,failure=='collision_limit' and failure or 'physics_rebuild_failed' end
     local sourceDirection=request.fracture or (request.travel and -request.travel)
@@ -514,9 +524,14 @@ function ENT:ProcessSplit(job,checkpoint)
     local islands=self:CachedIslands(checkpoint)
     self.LastIslandMs=(job:Time()-started)*1000
     self.LastIslandCount=#islands
-    if dynamic and #islands<2 then return end
     local largest=islands[1]
     for _,island in ipairs(islands) do if island.volume>largest.volume then largest=island end end
+    if dynamic and largest.volume<MIN_CHUNK_VOLUME then
+        for _,island in ipairs(islands) do self:ShatterIsland(island) checkpoint() end
+        self:Remove()
+        return
+    end
+    if dynamic and #islands<2 then return end
     local stay={}
     stay[largest]=true
     local detached={}

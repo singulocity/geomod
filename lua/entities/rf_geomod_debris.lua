@@ -5,6 +5,11 @@ ENT.PrintName='Temporary GeoMod rock'
 ENT.Spawnable=false
 ENT.RenderGroup=RENDERGROUP_TRANSLUCENT
 ENT.DoNotDuplicate=true
+local FADE_SECONDS=2
+
+function ENT:GetRockOpacity()
+    return math.Clamp(1-(CurTime()-self:GetFadeAt())/FADE_SECONDS,0,1)
+end
 
 function ENT:SetupDataTables()
     self:NetworkVar('Float',0,'RockRadius')
@@ -16,6 +21,7 @@ end
 if SERVER then
     function ENT:Initialize()
         self:SetModel('models/hunter/misc/sphere025x025.mdl')
+        self:DrawShadow(false)
         local radius=math.Clamp(self:GetRockRadius(),2,10)
         self:SetRockRadius(radius)
         self:PhysicsInitSphere(radius,'concrete')
@@ -75,7 +81,7 @@ if SERVER then
 
     function ENT:Think()
         local now=CurTime()
-        if now>self:GetFadeAt()+1 then self:Remove() return end
+        if now>=self:GetFadeAt()+FADE_SECONDS then self:Remove() return end
         local phys=self:GetPhysicsObject()
         if not IsValid(phys) then self:Remove() return end
         local pos=self:GetPos()
@@ -131,8 +137,14 @@ function ENT:BuildRockMesh()
     end
     self.RFMesh=Mesh() self.RFMesh:BuildFromTriangles(triangles)
     self.RFMeshSeed=seed
+    self.RFShadowGeometry={triangles={triangles},size=Vector(radius*3.6,radius*3.6,radius*3.6)}
     self:SetRenderBounds(Vector(-radius*3,-radius*3,-radius*3),Vector(radius*3,radius*3,radius*3))
     return triangles
+end
+
+function ENT:GetRockShadowGeometry()
+    if not self.RFMesh then self:BuildRockMesh() end
+    return self.RFShadowGeometry
 end
 
 function ENT:GetRockRenderMaterial()
@@ -156,7 +168,7 @@ end
 function ENT:DrawTranslucent()
     if not self.RFMesh then self:BuildRockMesh() end
     if not self.RFMesh then return end
-    local alpha=math.Clamp(self:GetFadeAt()+1-CurTime(),0,1)
+    local alpha=self:GetRockOpacity()
     if alpha<=0 then return end
     local transform=Matrix() transform:SetTranslation(self:GetPos()) transform:SetAngles(self:GetAngles())
     -- IMesh does not inherit model blend modulation. Drive the actual shader
@@ -179,4 +191,6 @@ end
 
 function ENT:OnRemove()
     if self.RFMesh then self.RFMesh:Destroy() self.RFMesh=nil end
+    local volume=self.RFShadowGeometry and self.RFShadowGeometry.shadowVolume
+    if volume then for _,m in ipairs(volume.meshes) do m:Destroy() end end
 end
