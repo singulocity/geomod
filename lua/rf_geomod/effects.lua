@@ -7,10 +7,11 @@ G.DebrisMaximum=CreateConVar('rf_geomod_debris_max','80',FCVAR_ARCHIVE,'Maximum 
 G.DebrisDamage=CreateConVar('rf_geomod_debris_damage','1',FCVAR_ARCHIVE,'Airborne GeoMod fragment damage multiplier.',0,10)
 util.AddNetworkString('rf_geomod_effect')
 
-local function event(kind,position,normal,radius,profile)
+local function event(kind,position,normal,radius,profile,direction)
     net.Start('rf_geomod_effect') net.WriteBool(kind=='drill')
     net.WriteVector(position) net.WriteNormal(normal) net.WriteFloat(radius)
     net.WriteString(profile)
+    net.WriteNormal(direction or normal)
     net.SendPVS(position)
 end
 
@@ -44,11 +45,12 @@ function G.SpawnFragment(position,velocity,radius,material,seed,profile)
     return rock
 end
 
-function G.EmitDestruction(wall,position,normal,radius,removedVolume,checkpoint)
+function G.EmitDestruction(wall,position,normal,radius,removedVolume,checkpoint,direction)
     if not G.EffectsEnabled:GetBool() then return end
     normal=normal:GetNormalized()
+    direction=G.DebrisDirection(direction,normal)
     local profile=G.WallEffectProfile(wall)
-    event('cut',position,normal,radius,profile)
+    event('cut',position,normal,radius,profile,direction)
     local count=math.Clamp(math.ceil(removedVolume/64000*6),4,18)
     local tangent=normal:Cross(math.abs(normal.z)<0.9 and vector_up or Vector(1,0,0)):GetNormalized()
     local other=normal:Cross(tangent)
@@ -58,7 +60,8 @@ function G.EmitDestruction(wall,position,normal,radius,removedVolume,checkpoint)
         local extent=Vector(size,size,size)
         local clear=util.TraceHull({start=pos,endpos=pos,mins=-extent,maxs=extent,mask=MASK_SOLID})
         if not clear.StartSolid then
-            local velocity=normal*math.Rand(90,260)+VectorRand()*70+vector_up*math.Rand(60,160)
+            local scatter=VectorRand()*65+vector_up*math.Rand(20,90)
+            local velocity=direction*math.Rand(100,280)+scatter-direction*scatter:Dot(direction)
             G.SpawnFragment(pos,velocity,size,wall.CutMaterialName,nil,profile)
         end
         if checkpoint then checkpoint() end

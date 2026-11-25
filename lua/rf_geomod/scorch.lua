@@ -1,6 +1,7 @@
 -- Planar texture projection only; never changes the wall or collision topology.
 RFGeoMod=RFGeoMod or {}
 function RFGeoMod.ScorchProjection(cut,normal,plane,sourceFace)
+    if cut.ram then return end
     local origin=cut.scorch_origin or cut.center
     if cut.scorch_origin then
         -- Check the original face side even if contouring tilted a rim triangle.

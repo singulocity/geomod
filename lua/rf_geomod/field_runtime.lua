@@ -126,7 +126,7 @@ local function mirrorPieces(wall,history,last,checkpoint)
             end
             pieces=remaining
         else
-            pieces=G.Subtract(pieces,op.center,op.radius,op.seed,op.normal,checkpoint)
+            pieces=G.SubtractCut(pieces,op,checkpoint)
             if not pieces then return end
         end
     end
@@ -142,6 +142,16 @@ function G.WallFor(ent)
     if IsValid(wall) and (wall:GetClass()=='rf_geomod_field' or wall:GetClass()=='rf_geomod_dynamic') then return wall end
 end
 function G.IsWall(ent) return IsValid(G.WallFor(ent)) end
+-- Resolve physical GeoMod surfaces without following another entity's owner.
+function G.ContactWall(ent)
+    if not IsValid(ent) then return end
+    local class=ent:GetClass()
+    if class=='rf_geomod_field' or class=='rf_geomod_dynamic' then return ent end
+    if class=='rf_geomod_field_chunk' or class=='func_brush' or class=='func_geomod' then
+        local wall=ent:GetNWEntity('rf_geomod_field_group')
+        if IsValid(wall) then return wall end
+    end
+end
 function G.RenderSurfaces(wall,exteriorOnly)
     local result={}
     if wall:GetClass()=='rf_geomod_field' then
@@ -167,8 +177,11 @@ if SERVER then
         data.entity=wall:EntIndex() data.serial=wall.FieldSerial data.revision=wall.Revision or 0
         data.history={} data.chunks={}
         for _,op in ipairs(wall.Cuts or {}) do
+            local ram=op.ram
             data.history[#data.history+1]={center={op.center.x,op.center.y,op.center.z},detach=op.detach,
                 normal=op.normal and {op.normal.x,op.normal.y,op.normal.z},radius=op.radius,seed=op.seed,
+                ram=ram and {right={ram.right.x,ram.right.y,ram.right.z},half={ram.half.x,ram.half.y,ram.half.z},
+                    travel={ram.travel.x,ram.travel.y,ram.travel.z}},
                 scorch_origin=op.scorch_origin and {op.scorch_origin.x,op.scorch_origin.y,op.scorch_origin.z}}
         end
         for key,ent in pairs(wall.FieldChunks or {}) do if IsValid(ent) then data.chunks[key]=ent:EntIndex() end end
@@ -374,39 +387,35 @@ if SERVER then
         end
     end
 
-    function R.Carve(point,normal,radius,seed,effectOrigin,atOrigin,scorchOrigin)
-        normal=normal:GetNormalized()
-        radius=math.Clamp(tonumber(radius) or 52,6,150)
-        seed=seed or math.random(1,2147483646)
-        local center=atOrigin and point or point+normal*radius*.4
-        center=Vector(math.Round(center.x*8)/8,math.Round(center.y*8)/8,math.Round(center.z*8)/8)
-        local candidates={}
-        for wall in pairs(R.groups) do if IsValid(wall) then
-            local scaled=math.Round(radius*G.HardnessCraterScale(wall.Hardness)*8)/8
-            local bound=scaled*2
-            local low,high=wall.Low,wall.High
-            if center.x+bound>=low.x and center.x-bound<=high.x and center.y+bound>=low.y and center.y-bound<=high.y and
-                center.z+bound>=low.z and center.z-bound<=high.z then
-                candidates[#candidates+1]={wall=wall,radius=scaled}
-            end
-        end end
+    local function queueCarves(candidates,normal,effectOrigin,done)
         if #candidates==0 then return false end
         push(nil,function(job,checkpoint)
             -- Publish each accepted polygon cut before uploading its physics.
             -- Clients can rebuild their own meshes while the server uploads.
             local accepted={}
             for _,candidate in ipairs(candidates) do
-                local wall,r=candidate.wall,candidate.radius
+                local wall,op=candidate.wall,candidate.op
                 if IsValid(wall) then
                     local began=job:Time()
-                    local op={center=center,radius=r,seed=seed,normal=normal,scorch_origin=scorchOrigin}
+                    local extracted,remaining
+                    if candidate.fracture then
+                        local pieces=mirrorPieces(wall,wall.Cuts,#wall.Cuts,checkpoint)
+                        if pieces then
+                            extracted={}
+                            remaining=G.SubtractCut(pieces,op,checkpoint,extracted)
+                            if not remaining then extracted=nil end
+                        end
+                    end
                     local removed,changed=G.CutAuthoredBoundary(wall.FieldVolume,op,checkpoint)
                     if changed>0 then
                         retireNative(wall)
                         wall.Cuts[#wall.Cuts+1]=op
+                        if remaining then wall.DetachPieces,wall.DetachApplied=remaining,#wall.Cuts end
                         wall.Revision=wall.FieldVolume.revision
                         R.Send(wall)
-                        accepted[#accepted+1]={wall=wall,dirty=0,changed=changed,r=r,cpu=job:Time()-began,removed=removed}
+                        accepted[#accepted+1]={wall=wall,dirty=0,changed=changed,r=op.radius,cpu=job:Time()-began,
+                            removed=removed,extracted=extracted,fracture=candidate.fracture,direction=candidate.direction,
+                            blastSource=op.scorch_origin}
                     end
                 end
             end
@@ -426,6 +435,9 @@ if SERVER then
                 if wall.DetachAnchor==nil then
                     wall.DetachAnchor=supported(wall,wall.InitialPieces,{},checkpoint)
                 end
+                if cut.extracted then
+                    G.SpawnImpactChunks(wall,cut.extracted,effectOrigin,normal,cut.r,checkpoint)
+                end
                 detachUnsupported(wall,checkpoint)
             end end
             for _,cut in ipairs(accepted) do if IsValid(cut.wall) then
@@ -433,11 +445,50 @@ if SERVER then
                 wall.LastFieldCut={changed=cut.changed,dirty=cut.dirty,cpu_ms=cut.cpu*1000,revision=wall.Revision}
                 hook.Run('RFGeoModGeometryChanged',wall)
                 if G.EmitDestruction then
-                    G.EmitDestruction(wall,effectOrigin or point,normal,cut.r,cut.removed,checkpoint)
+                    local origin,outward,direction=effectOrigin,normal,cut.direction or cut.fracture
+                    if cut.blastSource then
+                        local surface,surfaceNormal=G.ClosestSurface(wall.InitialPieces,cut.blastSource,checkpoint)
+                        if surface then
+                            origin,outward=surface,surfaceNormal
+                            direction=cut.blastSource-surface
+                        end
+                    end
+                    G.EmitDestruction(wall,origin,outward,cut.r,cut.removed,checkpoint,direction)
                 end
             end end
-        end,nil,false,true)
+        end,done,false,true,done)
         return true
+    end
+    function R.Carve(point,normal,radius,seed,effectOrigin,atOrigin,scorchOrigin,direction)
+        normal=normal:GetNormalized()
+        radius=math.Clamp(tonumber(radius) or 52,6,150)
+        seed=seed or math.random(1,2147483646)
+        local center=atOrigin and point or point+normal*radius*.4
+        center=Vector(math.Round(center.x*8)/8,math.Round(center.y*8)/8,math.Round(center.z*8)/8)
+        local candidates={}
+        for wall in pairs(R.groups) do if IsValid(wall) then
+            local scaled=math.Round(radius*G.HardnessCraterScale(wall.Hardness)*8)/8
+            local bound=scaled*2
+            local low,high=wall.Low,wall.High
+            if center.x+bound>=low.x and center.x-bound<=high.x and center.y+bound>=low.y and center.y-bound<=high.y and
+                center.z+bound>=low.z and center.z-bound<=high.z then
+                local op={center=center,radius=scaled,seed=seed,normal=normal,scorch_origin=scorchOrigin}
+                candidates[#candidates+1]={wall=wall,op=op,direction=direction}
+            end
+        end end
+        return queueCarves(candidates,normal,effectOrigin or point)
+    end
+    function G.CutContact(wall,point,normal,radius,fracture)
+        if not IsValid(wall) then return false end
+        if wall:GetClass()=='rf_geomod_dynamic' then
+            return wall:CutContact(point,normal,radius,fracture)
+        end
+        if not R.groups[wall] or not wall.FieldReady or wall.ContactCutPending then return false end
+        local op=fracture and G.ContactFracture(point,radius) or G.ContactCut(point,radius)
+        wall.ContactCutPending=true
+        return queueCarves({{wall=wall,op=op,fracture=fracture}},normal:GetNormalized(),point,function()
+            if IsValid(wall) then wall.ContactCutPending=nil end
+        end)
     end
     R.recent={}
     function R.Blast(position,normal,radius,inflictor,originIsCenter,hit)
@@ -448,7 +499,12 @@ if SERVER then
         -- A blast without a GeoMod contact projects from its origin onto each
         -- facing wall. Its force or floor normal still orients the cutter.
         local scorchOrigin=not R.groups[G.WallFor(hit)] and position or nil
-        return R.Carve(position,normal,radius,nil,position,originIsCenter,scorchOrigin)
+        local direction
+        if not scorchOrigin and IsValid(inflictor) then
+            local velocity=inflictor:GetVelocity()
+            if velocity:Dot(normal)<0 then direction=-velocity end
+        end
+        return R.Carve(position,normal,radius,nil,position,originIsCenter,scorchOrigin,direction)
     end
     function R.Damage(wall,info)
         wall.DamageEvents=(wall.DamageEvents or 0)+1
@@ -647,6 +703,11 @@ else
         for _,op in ipairs(data.history) do
             op.center=Vector(unpack(op.center))
             if op.normal then op.normal=Vector(unpack(op.normal)) end
+            if op.ram then
+                op.ram.right=Vector(unpack(op.ram.right))
+                op.ram.half=Vector(unpack(op.ram.half))
+                op.ram.travel=Vector(unpack(op.ram.travel))
+            end
             if op.scorch_origin then op.scorch_origin=Vector(unpack(op.scorch_origin)) end
         end
         R.pending[data.serial]=data

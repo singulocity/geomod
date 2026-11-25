@@ -4,6 +4,8 @@ include('rf_geomod/scorch.lua')
 
 local G=RFGeoMod
 local materials={}
+local shadowMaterial=Material('models/debug/debugwhite')
+local depthFlags=bit.bor(STUDIO_SHADOWDEPTHTEXTURE or 0,STUDIO_SSAODEPTHTEXTURE or 0)
 local function wallMaterial(path)
     if not materials[path] then
         local texture=Material(path):GetTexture('$basetexture')
@@ -19,12 +21,15 @@ function ENT:Initialize()
     self:ApplyWallConfiguration({})
     self.Cuts={} self.Pieces={} self:SetSolid(SOLID_NONE)
     self:ConfigureBounds()
+    self:DrawShadow(false)
 end
 
 local function freeMeshes(bundle)
     if not bundle then return end
     for _,mesh in ipairs(bundle.meshes) do mesh:Destroy() end
     for _,group in ipairs(bundle.scorch) do group.mesh:Destroy() end
+    if bundle.shadow then bundle.shadow.Mesh:Destroy() end
+    for _,mesh in ipairs(bundle.shadowVolume and bundle.shadowVolume.meshes or {}) do mesh:Destroy() end
 end
 
 function ENT:GenerateMeshes(job,checkpoint)
@@ -76,6 +81,20 @@ function ENT:GenerateMeshes(job,checkpoint)
         total=total+#triangles[i]
         checkpoint()
     end
+    -- Projected-light depth passes can use the same shape as one opaque mesh.
+    -- Ordinary map shadows are drawn from the triangles in shadows.lua.
+    if total>0 and total<=65535 then
+        local vertices={}
+        for _,list in ipairs(triangles) do
+            for i,vertex in ipairs(list) do
+                vertices[#vertices+1]=vertex
+                if i%512==0 then checkpoint() end
+            end
+        end
+        local mesh=Mesh(shadowMaterial)
+        mesh:BuildFromTriangles(vertices)
+        renderBundle.shadow={Mesh=mesh,Material=shadowMaterial}
+    end
     for _,entry in pairs(scorchPlanes) do if entry then
         entry.mesh=Mesh(G.GetScorchMaterial())
         renderBundle.scorch[#renderBundle.scorch+1]=entry
@@ -112,18 +131,29 @@ function ENT:UpdateLightCube()
 end
 
 
-function ENT:Draw()
+function ENT:GetRenderMesh()
+    return self.RenderBundle and self.RenderBundle.shadow
+end
+
+function ENT:DrawWallSurface()
     local bundle=self.RenderBundle
-    if not bundle then return end
-    self.RenderMatrix=self:GetWorldTransformMatrix()
-    self:UpdateLightCube()
-    local function drawMesh()
-        for i,mesh in ipairs(bundle.meshes) do
-            if #self.RenderTriangles[i]>0 then
-                render.SetMaterial(wallMaterial(bundle.materials[i])) mesh:Draw()
-            end
+    for i,mesh in ipairs(bundle.meshes) do
+        if #self.RenderTriangles[i]>0 then
+            render.SetMaterial(wallMaterial(bundle.materials[i])) mesh:Draw()
         end
     end
+end
+
+function ENT:Draw(flags)
+    local bundle=self.RenderBundle
+    if not bundle then return end
+    if flags and bit.band(flags,depthFlags)~=0 and bundle.shadow then
+        self:DrawModel(flags)
+        return
+    end
+    self.RenderMatrix=self:GetWorldTransformMatrix()
+    self:UpdateLightCube()
+    local function drawMesh() self:DrawWallSurface() end
     cam.PushModelMatrix(self.RenderMatrix)
     render.SuppressEngineLighting(true)
     render.SetLocalModelLights()
@@ -184,8 +214,11 @@ local function applySnapshot(ent,snapshot,job,checkpoint)
     local prefix=not configChanged and ent.LocalRevision~=nil and #cuts>=#previous
     if prefix then for i,old in ipairs(previous) do
         local cut=cuts[i]
+        local oldRam,newRam=old.ram,cut.ram
         if old.kind~=cut.kind or old.center:DistToSqr(cut.center)>0.000001 or old.seed~=cut.seed or
                 old.radius~=cut.radius or old.bore~=cut.bore or
+                (oldRam==nil)~=(newRam==nil) or
+                (oldRam and newRam and (oldRam.right~=newRam.right or oldRam.half~=newRam.half or oldRam.travel~=newRam.travel)) or
                 (old.normal and old.normal:DistToSqr(cut.normal)>0.000001) then
             prefix=false break
         end
@@ -232,6 +265,7 @@ local function applySnapshot(ent,snapshot,job,checkpoint)
     freeMeshes(ent.RenderBundle)
     ent.BuildingBundle=nil
     ent.RenderBundle,ent.RenderTriangles=mesh.bundle,triangles
+    if mesh.bundle.shadow then ent:UpdateShadow() end
     ent.RenderStats={triangles=count/3}
     ent.Cuts,ent.Pieces,ent.CutBoundary=cuts,pieces,boundary
     ent.LocalRevision,ent.RenderRevision=snapshot.revision,snapshot.revision
@@ -254,6 +288,11 @@ net.Receive('rf_geomod_state',function()
             op.radius,op.seed=net.ReadFloat(),net.ReadUInt(16)
             op.normal=Vector(net.ReadFloat(),net.ReadFloat(),net.ReadFloat())
             op.bore=net.ReadBool()
+            if net.ReadBool() then
+                op.ram={right=Vector(net.ReadFloat(),net.ReadFloat(),net.ReadFloat()),
+                    half=Vector(net.ReadFloat(),net.ReadFloat(),net.ReadFloat()),
+                    travel=Vector(net.ReadFloat(),net.ReadFloat(),net.ReadFloat())}
+            end
         end
         cuts[i]=op
     end

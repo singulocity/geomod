@@ -79,8 +79,8 @@ local function subtractFrom(polygons,solid,checkpoint)
 end
 
 local function cutter(op)
-    local planes=RFGeoMod.CutterPlanes(op.radius,op.seed,op.normal,op.bore)
-    local extent=op.radius*3
+    local planes=RFGeoMod.CutterPlanes(op.radius,op.seed,op.normal,op.bore,op.ram)
+    local extent=op.ram and RFGeoMod.RamCutExtent(op.ram) or op.radius*3
     local bounds=Vector(extent,extent,extent)
     local cuts={planes=planes,faces={},center=op.center,low=op.center-bounds,high=op.center+bounds}
     for _,p in ipairs(planes) do p.d=p.d+p.normal:Dot(op.center) end

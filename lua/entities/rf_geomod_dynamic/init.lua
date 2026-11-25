@@ -67,6 +67,7 @@ function ENT:Initialize()
     local loaded,err=self:LoadWallSource(self.BrushSourceModel)
     if not loaded then ErrorNoHalt('[GeoMod] '..tostring(err)..'\n') return end
     self:SetModel('models/hunter/blocks/cube025x025x025.mdl')
+    self:DrawShadow(false)
     if not self.DynamicWall then self:SetMoveType(MOVETYPE_NONE) end
     self:SetHealth(1000000)
     self:SetSaveValue('m_takedamage',2)
@@ -143,6 +144,13 @@ function ENT:SendState(ply)
             -- clients a slightly different cutter than the server's.
             net.WriteFloat(n.x) net.WriteFloat(n.y) net.WriteFloat(n.z)
             net.WriteBool(op.bore==true)
+            net.WriteBool(op.ram~=nil)
+            if op.ram then
+                local right,half,travel=op.ram.right,op.ram.half,op.ram.travel
+                net.WriteFloat(right.x) net.WriteFloat(right.y) net.WriteFloat(right.z)
+                net.WriteFloat(half.x) net.WriteFloat(half.y) net.WriteFloat(half.z)
+                net.WriteFloat(travel.x) net.WriteFloat(travel.y) net.WriteFloat(travel.z)
+            end
         end
     end
     if IsValid(ply) then net.Send(ply) else
@@ -199,7 +207,7 @@ function ENT:ScheduleCuts()
     end)
 end
 
-function ENT:QueueCarve(position,normal,radius,effectOrigin,onComplete,travel)
+function ENT:QueueCarve(position,normal,radius,effectOrigin,onComplete,travel,contact,fracture)
     if not self.Pieces then return false end
     if (self.CutCount or 0)>=G.MaxCuts or #self.Cuts>=G.MaxOps-1 then
         self.LastCutResult='cut_history_limit'
@@ -209,7 +217,8 @@ function ENT:QueueCarve(position,normal,radius,effectOrigin,onComplete,travel)
     if (self.CutCount or 0)+(self.PendingCuts or 0)>=G.MaxCuts then return false end
     self.CutRequests=self.CutRequests or {}
     self.CutRequests[#self.CutRequests+1]={position=position,normal=normal,radius=radius,
-        effectOrigin=effectOrigin,seed=math.random(1,65535),done=onComplete,travel=travel}
+        effectOrigin=effectOrigin,seed=contact and contact.seed or math.random(1,65535),
+        done=onComplete,travel=travel,contact=contact,fracture=fracture}
     self.PendingCuts=(self.PendingCuts or 0)+1
     self:NextThink(CurTime())
     self:ScheduleCuts()
@@ -221,34 +230,49 @@ function ENT:CarveAt(position,normal,radius,effectOrigin,onComplete)
         self:WorldToLocal(effectOrigin or position),onComplete)
 end
 
+function ENT:CutContact(point,normal,radius,fracture)
+    local position=self:WorldToLocal(point)
+    local direction=self:WorldToLocal(self:GetPos()+normal)
+    local sourceDirection=fracture and self:WorldToLocal(self:GetPos()+fracture)
+    local op=fracture and G.ContactFracture(position,radius) or G.ContactCut(position,radius)
+    return self:QueueCarve(position,direction,radius,nil,nil,nil,op,sourceDirection)
+end
+
 function ENT:PlanCut(pieces,request,checkpoint)
     local position,normal=request.position,request.normal
-    local radius=math.Clamp(request.radius,24,100)*G.HardnessCraterScale(self.Hardness)
-    radius=math.Round(math.Clamp(radius,6,150)*8)/8
-    if request.travel then
-        -- A previous hit in this burst may have removed the rocket's contact
-        -- face. Continue along its flight path through the staged geometry.
-        local direction=request.travel
-        local reach=(self.High-self.Low):Length()+8
-        local hit=G.Trace(pieces,position-direction*4,direction*reach)
-        if not hit then return nil,'no_remaining_surface' end
-        position,normal=hit.HitPos,-direction
-        if self.BoxSource and math.abs(direction.x)>.9 then
-            normal=Vector(direction.x<0 and 1 or -1,0,0)
+    local op=request.contact
+    if not op then
+        local radius=math.Clamp(request.radius,24,100)*G.HardnessCraterScale(self.Hardness)
+        radius=math.Round(math.Clamp(radius,6,150)*8)/8
+        if request.travel then
+            -- A previous hit may have removed the rocket's contact face.
+            -- Continue along its flight path through the staged geometry.
+            local direction=request.travel
+            local reach=(self.High-self.Low):Length()+8
+            local hit=G.Trace(pieces,position-direction*4,direction*reach)
+            if not hit then return nil,'no_remaining_surface' end
+            position,normal=hit.HitPos,-direction
+            if self.BoxSource and math.abs(direction.x)>.9 then
+                normal=Vector(direction.x<0 and 1 or -1,0,0)
+            end
+        elseif not normal then
+            position,normal=G.ClosestSurface(pieces,position,checkpoint)
+            if not position then return nil,'no_remaining_surface' end
         end
-    elseif not normal then
-        position,normal=G.ClosestSurface(pieces,position,checkpoint)
-        if not position then return nil,'no_remaining_surface' end
+        op={kind=G.OP_CUT,center=snapVector(position+normal*radius*.4,8),
+            radius=radius,seed=request.seed,normal=snapVector(normal,4096),bore=false}
     end
-    local op={kind=G.OP_CUT,center=snapVector(position+normal*radius*.4,8),
-        radius=radius,seed=request.seed,normal=snapVector(normal,4096),bore=false}
-    local remaining,err=G.ApplyOp(pieces,op,checkpoint)
+    local extracted=request.fracture and {}
+    local remaining,err=G.SubtractCut(pieces,op,checkpoint,extracted)
     if not remaining then return nil,'complexity_limit',err end
     local removed=G.Volume(pieces)-G.Volume(remaining)
     if removed<.1 then return nil,'no_volume_removed' end
     local hulls,failure=self:PrepareCollision(remaining,checkpoint)
     if not hulls then return nil,failure=='collision_limit' and failure or 'physics_rebuild_failed' end
-    return {pieces=remaining,hulls=hulls,op=op,origin=request.effectOrigin or position,normal=normal,removed=removed}
+    local sourceDirection=request.fracture or (request.travel and -request.travel)
+        or ((request.effectOrigin or request.position)-position)
+    return {pieces=remaining,hulls=hulls,op=op,origin=request.effectOrigin or position,normal=normal,
+        direction=G.DebrisDirection(sourceDirection,normal),removed=removed,extracted=extracted}
 end
 
 function ENT:ApplyCuts(job,checkpoint)
@@ -293,10 +317,14 @@ function ENT:ApplyCuts(job,checkpoint)
             self:QueueState()
             hook.Run('RFGeoModGeometryChanged',self)
             for _,cut in ipairs(accepted) do
+                if cut.extracted then
+                    G.SpawnImpactChunks(self,cut.extracted,cut.origin,cut.normal,cut.op.radius,checkpoint)
+                end
                 if G.EmitDestruction then
                     local origin=self:LocalToWorld(cut.origin)
                     local normal=(self:LocalToWorld(cut.normal)-self:GetPos()):GetNormalized()
-                    G.EmitDestruction(self,origin,normal,cut.op.radius,cut.removed,checkpoint)
+                    local direction=(self:LocalToWorld(cut.direction)-self:GetPos()):GetNormalized()
+                    G.EmitDestruction(self,origin,normal,cut.op.radius,cut.removed,checkpoint,direction)
                 end
             end
             self:ProcessSplit(job,checkpoint)
@@ -410,15 +438,66 @@ function G.SpawnDetachedWall(wall,island,pieces)
     local child=ents.Create('rf_geomod_dynamic')
     if not IsValid(child) then return end
     child.SeedPieces,child.SeedMaterials,child.EncodedSeed=localPieces,wall.WallMaterialNames,encoded
-    child.WallKeyValues={hardness=wall.Hardness,cut_material=wall.CutMaterialName,cut_repeat=wall.CutRepeat}
+    local dynamic=wall:GetClass()=='rf_geomod_dynamic'
+    child.WallKeyValues={hardness=wall.Hardness,cut_material=wall.CutMaterialName,cut_repeat=wall.CutRepeat,
+        surface_material=wall.SurfaceMaterialName,surface_repeat=wall.SurfaceRepeat,disable_physgun='0'}
     child.IsChunk,child.FrozenWall=true,true
     child.GeoModSourceWall=wall
-    child:SetPos(center)
+    if dynamic then
+        child.RFGeoModOwner=wall.RFGeoModOwner
+        child:SetPos(wall:LocalToWorld(center))
+        child:SetAngles(wall:GetAngles())
+    else
+        child:SetPos(center)
+    end
     child:Spawn()
-    if not child.Pieces then child:Remove() return end
+    if not child.Pieces or not IsValid(child:GetPhysicsObject()) then child:Remove() return end
     child:Activate()
+    if dynamic then
+        local owner=child.RFGeoModOwner
+        if IsValid(owner) then
+            owner:AddCleanup('rf_geomod_walls',child)
+            if child.CPPISetOwner then child:CPPISetOwner(owner) end
+        end
+        shareUndo(wall,child)
+    end
     G.Chunks[#G.Chunks+1]=child
     return child
+end
+
+function G.SpawnImpactChunks(wall,extracted,point,normal,radius,checkpoint)
+    if liveChunks()>=maxChunks:GetInt() then return end
+    local parts={}
+    for _,pieces in ipairs(G.FracturePieces(extracted,normal,checkpoint)) do
+        for _,island in ipairs(G.Islands(pieces,nil,checkpoint)) do
+            if island.volume>=MIN_CHUNK_VOLUME then
+                local members={}
+                for _,index in ipairs(island.indices) do members[#members+1]=pieces[index] end
+                parts[#parts+1]={island=island,pieces=members}
+            end
+        end
+    end
+    table.sort(parts,function(a,b) return a.island.volume>b.island.volume end)
+    local dynamic=wall:GetClass()=='rf_geomod_dynamic'
+    local parentPhysics=dynamic and wall:GetPhysicsObject()
+    local worldPoint=dynamic and wall:LocalToWorld(point) or point
+    local outward=dynamic and (wall:LocalToWorld(normal)-wall:GetPos()):GetNormalized() or normal
+    wall.GeoModNextImpact=math.max(wall.GeoModNextImpact or 0,CurTime()+.14)
+    for index=1,math.min(#parts,3) do
+        local part=parts[index]
+        local child=G.SpawnDetachedWall(wall,part.island,part.pieces)
+        if IsValid(child) then
+            local physics=child:GetPhysicsObject()
+            local offset=child:GetPos()-worldPoint
+            local spread=(offset-outward*offset:Dot(outward))*(60/radius)
+            local inherited=IsValid(parentPhysics) and parentPhysics:GetVelocityAtPoint(child:GetPos()) or Vector()
+            child.GeoModNextStrike=CurTime()+.14
+            child.GeoModNextImpact=CurTime()+.14
+            physics:EnableMotion(true)
+            physics:SetVelocity(inherited+outward*55+spread)
+            physics:Wake()
+        end
+    end
 end
 
 function ENT:ProcessSplit(job,checkpoint)
@@ -563,9 +642,12 @@ local function sanitizeOps(input)
         if kind==G.OP_CUT then
             cuts=cuts+1
             if cuts>G.MaxCuts or not isvector(op.normal) then return end
-            ops[#ops+1]={kind=kind,center=snapVector(op.center,8),radius=math.Clamp(tonumber(op.radius) or 24,6,150),
+            local clean={kind=kind,center=snapVector(op.center,8),radius=math.Clamp(tonumber(op.radius) or 24,6,150),
                 seed=math.Clamp(math.floor(tonumber(op.seed) or 1),0,65535),normal=snapVector(op.normal,4096),
                 bore=op.bore==true}
+            local ram=op.ram
+            if ram~=nil and (not istable(ram) or not G.SetRamShape(clean,op.normal,ram.right,ram.half,ram.travel)) then return end
+            ops[#ops+1]=clean
         elseif kind==G.OP_KEEP or kind==G.OP_DROP then
             ops[#ops+1]={kind=kind,center=snapVector(op.center,8)}
         else return end

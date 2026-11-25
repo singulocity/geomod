@@ -32,7 +32,7 @@ if SERVER then
     return
 end
 
-local enabled=CreateClientConVar('rf_geomod_shadows','1',true,false,'GeoMod walls receive dynamic shadows from players, NPCs and props.',0,1)
+local enabled=CreateClientConVar('rf_geomod_shadows','1',true,false,'Draw dynamic GeoMod shadows.',0,1)
 local rShadows=GetConVar('r_shadows')
 local debugView=CreateClientConVar('rf_geomod_shadows_debug','0',false,false,'Draw the GeoMod shadow overlay unblended.',0,1)
 local GRID=8                    -- silhouette cells per atlas side
@@ -40,6 +40,7 @@ local MAX_CASTERS=GRID*GRID
 local RANGE=2500                -- casters farther from the view are skipped
 local SNAP=16                   -- tile snapping and padding: rebuilds only when a caster crosses it
 local BIAS=0.25                 -- lift above the receiving face against z-fighting
+local neutralTone=Vector(1,1,1)
 local BUILDS_PER_FRAME=4        -- nearest casters first; the rest build on later frames
 -- Like the engine: any model entity casts unless it disabled its shadow
 -- (DrawShadow(false) sets EF_NOSHADOW). These never cast on their own.
@@ -52,6 +53,8 @@ local resolution=CreateClientConVar('rf_geomod_shadows_resolution','256',true,fa
     'Pixels per GeoMod shadow silhouette (64, 128, 256 or 512).',64,512)
 local silhouette=CreateMaterial('rf_geomod_shadow_caster','UnlitGeneric',{
     ['$basetexture']='vgui/white',['$model']='1',['$nofog']='1'})
+local volumeMaterial=CreateMaterial('rf_geomod_shadow_volume','UnlitGeneric',{
+    ['$basetexture']='vgui/white',['$nofog']='1'})
 -- Edge softness: each silhouette is copied into its atlas cell four times with
 -- small sub-pixel offsets and alpha 1, 1/2, 1/3, 1/4, which leaves the average
 -- of the four (a small box blur). An earlier version multiplied four offset
@@ -69,6 +72,124 @@ local SOFT_OFFSETS={{1,0},{-1,0},{0,1},{0,-1}}
 -- Native shadows last somewhat beyond the map's shadow_control distance before
 -- fading out completely; 1.3 matched them on Coffee Break (user tuning, RF-137).
 local FADE_SCALE=1.3
+
+-- The native RTT path draws the backing studio model, which is only a tiny
+-- cube. Extrude the real light-facing triangles instead. Each closed prism
+-- contributes to the stencil winding even where volumes overlap or the view
+-- enters the shadow. The scene depth already includes slopes and props.
+function G.WallShadowPrisms(groups,direction,reach,emit)
+    local near,far=direction*.15,direction*reach
+    for _,vertices in ipairs(groups) do
+        for i=1,#vertices-2,3 do
+            if vertices[i].normal:Dot(direction)<-.001 then
+                local a,b,c=vertices[i].pos,vertices[i+1].pos,vertices[i+2].pos
+                local A,B,C=a+far,b+far,c+far
+                a,b,c=a+near,b+near,c+near
+                emit(a,b,c,C,B,A,
+                    b,a,A,b,A,B,
+                    c,b,B,c,B,C,
+                    a,c,C,a,C,A)
+            end
+        end
+    end
+end
+
+local function wallShadowVolume(ent,direction,reach)
+    local bundle=ent.RenderBundle
+    if not bundle or not ent.RenderTriangles then return end
+    local localDirection=ent:WorldToLocal(ent:GetPos()+direction):GetNormalized()
+    local old=bundle.shadowVolume
+    if old and old.reach==reach and old.direction:DistToSqr(localDirection)<.000025 then return old.meshes end
+    local size=ent.High-ent.Low
+    local depth=math.abs(localDirection.x)*size.x+math.abs(localDirection.y)*size.y+math.abs(localDirection.z)*size.z
+    local meshes,positions={},{}
+    local function flush()
+        if #positions==0 then return end
+        local result=Mesh(volumeMaterial)
+        mesh.Begin(result,MATERIAL_TRIANGLES,#positions/3)
+        for _,position in ipairs(positions) do
+            mesh.Position(position)
+            mesh.TexCoord(0,0,0)
+            mesh.AdvanceVertex()
+        end
+        mesh.End()
+        meshes[#meshes+1]=result
+        positions={}
+    end
+    G.WallShadowPrisms(ent.RenderTriangles,localDirection,reach+depth,function(...)
+        for i=1,24 do positions[#positions+1]=select(i,...) end
+        if #positions>=60000 then flush() end
+    end)
+    flush()
+    if old then for _,m in ipairs(old.meshes) do m:Destroy() end end
+    bundle.shadowVolume={meshes=meshes,reach=reach,direction=localDirection}
+    return meshes
+end
+
+local function drawWallShadows()
+    local eye=EyePos()
+    local direction=GetGlobal2Vector('RFGeoModShadowDir',Vector(0,0,-1)):GetNormalized()
+    if direction:LengthSqr()<.5 then return end
+    local reach=GetGlobal2Float('RFGeoModShadowDistance',50)*FADE_SCALE
+    local shade=math.Clamp(255-GetGlobal2Float('RFGeoModShadowColor',64),0,217)
+    if reach<=0 or shade<=0 then return end
+    local draws,walls={},{}
+    for _,ent in ipairs(ents.FindByClass('rf_geomod_dynamic')) do
+        if ent.RenderBundle and not ent:IsDormant() and not ent:GetNoDraw() and ent:GetPos():DistToSqr(eye)<RANGE*RANGE then
+            local matrix=ent:GetWorldTransformMatrix()
+            walls[#walls+1]={ent=ent,matrix=matrix}
+            local meshes=wallShadowVolume(ent,direction,reach)
+            if meshes and #meshes>0 then draws[#draws+1]={meshes=meshes,matrix=matrix} end
+        end
+    end
+    if #draws==0 then return end
+    render.ClearStencil()
+    render.SetStencilEnable(true)
+    render.SetStencilWriteMask(255)
+    render.SetStencilTestMask(255)
+    render.SetStencilReferenceValue(0)
+    render.SetStencilCompareFunction(STENCIL_ALWAYS)
+    render.SetStencilPassOperation(STENCIL_KEEP)
+    render.SetStencilFailOperation(STENCIL_KEEP)
+    render.OverrideColorWriteEnable(true,false)
+    render.OverrideAlphaWriteEnable(true,false)
+    render.OverrideDepthEnable(true,false)
+    render.SetMaterial(volumeMaterial)
+    local function drawFaces(cull,operation)
+        render.CullMode(cull)
+        render.SetStencilZFailOperation(operation)
+        for _,draw in ipairs(draws) do
+            cam.PushModelMatrix(draw.matrix)
+            for _,m in ipairs(draw.meshes) do m:Draw() end
+            cam.PopModelMatrix()
+        end
+    end
+    drawFaces(MATERIAL_CULLMODE_CCW,STENCIL_INCR)
+    drawFaces(MATERIAL_CULLMODE_CW,STENCIL_DECR)
+    render.CullMode(MATERIAL_CULLMODE_CCW)
+    -- Give the caster surface priority over its volume. Where a prism side
+    -- lies on the wall face (common on axis-aligned walls), their depths can
+    -- quantize differently. Clear the mask only on visible wall pixels so
+    -- that disagreement cannot flash on the wall or erase a ground shadow.
+    render.SetStencilZFailOperation(STENCIL_KEEP)
+    render.SetStencilPassOperation(STENCIL_ZERO)
+    for _,wall in ipairs(walls) do
+        cam.PushModelMatrix(wall.matrix)
+        wall.ent:DrawWallSurface()
+        cam.PopModelMatrix()
+    end
+    render.SetStencilPassOperation(STENCIL_KEEP)
+    render.OverrideDepthEnable(false)
+    render.OverrideColorWriteEnable(false)
+    render.OverrideAlphaWriteEnable(false)
+    render.SetStencilCompareFunction(STENCIL_NOTEQUAL)
+    cam.Start2D()
+    surface.SetDrawColor(0,0,0,shade)
+    surface.DrawRect(0,0,ScrW(),ScrH())
+    cam.End2D()
+    render.SetStencilEnable(false)
+    render.ClearStencil()
+end
 local supersample=CreateClientConVar('rf_geomod_shadows_supersample','1',true,false,'Anti-alias GeoMod shadow edges (2x2 supersampling).',0,1)
 local CELL,atlas,projected,scratch,scratchMaterial
 local function useResolution()
@@ -110,12 +231,29 @@ local function receiverStamp(ent)
 end
 
 -- World AABB only: cheap enough to keep for every receiver on the map.
+function G.MovableShadowBounds(low,high,toWorld)
+    local minimum,maximum=Vector(math.huge,math.huge,math.huge),Vector(-math.huge,-math.huge,-math.huge)
+    for _,x in ipairs({low.x,high.x}) do
+        for _,y in ipairs({low.y,high.y}) do
+            for _,z in ipairs({low.z,high.z}) do
+                local p=toWorld(Vector(x,y,z))
+                minimum.x,minimum.y,minimum.z=math.min(minimum.x,p.x),math.min(minimum.y,p.y),math.min(minimum.z,p.z)
+                maximum.x,maximum.y,maximum.z=math.max(maximum.x,p.x),math.max(maximum.y,p.y),math.max(maximum.z,p.z)
+            end
+        end
+    end
+    return minimum,maximum
+end
+
 local function receiverBounds(ent,stamp)
     local cache=ent.RFShadowBounds
     if cache and cache.stamp==stamp then return cache end
     local low,high=Vector(math.huge,math.huge,math.huge),Vector(-math.huge,-math.huge,-math.huge)
     if ent:GetClass()=='rf_geomod_dynamic' then
-        low,high=ent:WorldSpaceAABB()
+        -- The receiver is the cut render mesh. Use its local bounds and
+        -- transform, including when a very tall wall is rotated into a floor.
+        local matrix=ent:GetWorldTransformMatrix()
+        low,high=G.MovableShadowBounds(ent.Low,ent.High,function(point) return matrix*point end)
     else
         for _,list in pairs(ent.FieldVertices or {}) do
             for _,vertex in ipairs(list) do
@@ -149,9 +287,10 @@ local function receiverData(ent,stamp)
         end
     end
     if ent:GetClass()=='rf_geomod_dynamic' then
-        local origin,angles=ent:GetPos(),ent:GetAngles()
-        local function toWorld(p) return LocalToWorld(p,angle_zero,origin,angles) end
-        local function rotate(n) local w=Vector(n) w:Rotate(angles) return w end
+        local matrix=ent:GetWorldTransformMatrix()
+        local origin=matrix:GetTranslation()
+        local function toWorld(p) return matrix*p end
+        local function rotate(n) return (matrix*n-origin):GetNormalized() end
         for _,list in ipairs(ent.RenderTriangles) do add(list,toWorld,rotate) end
     else
         for _,list in pairs(ent.FieldVertices or {}) do add(list) end
@@ -226,11 +365,11 @@ local function receiversIn(low,high,movable)
 end
 
 
-local function clip(points,axis,limit,sign)
+local function clip(points,axis,limit,sign,world)
     local output={}
     for i,a in ipairs(points) do
         local b=points[i%#points+1]
-        local da,db=sign*(a[axis]-limit),sign*(b[axis]-limit)
+        local da,db=sign*((world and a.p or a)[axis]-limit),sign*((world and b.p or b)[axis]-limit)
         if da<=0 then output[#output+1]=a end
         if (da<0 and db>0) or (da>0 and db<0) then
             local t=da/(da-db)
@@ -240,7 +379,6 @@ local function clip(points,axis,limit,sign)
     return output
 end
 
--- The caster's shadow volume in the (u, v, d) frame of the shadow direction.
 -- The caster's shadow volume in the (u, v, d) frame of the shadow direction.
 -- Built from the bounding sphere, so a spinning pickup keeps the same tile and
 -- its projected geometry is not rebuilt every frame.
@@ -252,15 +390,24 @@ local function volume(ent,u,v,direction,distance)
         near=math.floor((cd-radius)/16)*16,far=math.ceil((cd+radius+distance)/16)*16}
 end
 
--- The caster's bottom below its centre, along the shadow direction, for the
--- fade. The AABB's extreme corner is further along a tilted light than the
--- floor under the centre (by ~4 units for a person under Coffee Break's light),
--- which rejected that floor; over a drop (a GeoMod ledge) no world brush was
--- in reach either, and the shadow faded out entirely.
-local function feet(ent,direction)
-    local low=ent:WorldSpaceAABB()
-    local center=ent:WorldSpaceCenter()
-    return Vector(center.x,center.y,low.z):Dot(direction)
+function G.ShadowHasFootprintContact(ground,low,high)
+    -- The light ray through the centre can miss a narrow ledge or pass
+    -- through a hole even while the prop rests on the remaining surface.
+    -- Limit the fallback to the contact slab so a nearby ledge above the
+    -- prop or well below it cannot reset the normal distance fade.
+    for _,triangle in ipairs(ground) do
+        local polygon=clip(triangle,'z',low.z+2,1,true)
+        if #polygon>=3 then polygon=clip(polygon,'z',low.z-4,-1,true) end
+        if #polygon>=3 then polygon=clip(polygon,'x',low.x,-1,true) end
+        if #polygon>=3 then polygon=clip(polygon,'x',high.x,1,true) end
+        if #polygon>=3 then polygon=clip(polygon,'y',low.y,-1,true) end
+        if #polygon>=3 then polygon=clip(polygon,'y',high.y,1,true) end
+        for i=2,#polygon-1 do
+            local normal=(polygon[i].p-polygon[1].p):Cross(polygon[i+1].p-polygon[1].p)
+            if math.abs(normal.z)>.001 then return true end
+        end
+    end
+    return false
 end
 
 local function volumeBox(vol,u,v,direction)
@@ -404,12 +551,11 @@ end
 -- Distance from the caster's lowest point down to the receiving surface under
 -- its centre: our own projected triangles first, then the world for casters
 -- whose centre is over native floor.
-local function groundGap(ent,entry,u,v,direction,reach)
-    local bottom=feet(ent,direction)
-    local center=ent:WorldSpaceCenter()
-    local cu,cv=center:Dot(u),center:Dot(v)
+function G.ShadowReceiverDepth(ground,foot,u,v,direction)
+    local bottom=foot:Dot(direction)
+    local cu,cv=foot:Dot(u),foot:Dot(v)
     local best
-    for _,tri in ipairs(entry.ground or {}) do
+    for _,tri in ipairs(ground) do
         local a,b,c=tri[1],tri[2],tri[3]
         local det=(b.v-c.v)*(a.u-c.u)+(c.u-b.u)*(a.v-c.v)
         if math.abs(det)>1e-6 then
@@ -422,8 +568,20 @@ local function groundGap(ent,entry,u,v,direction,reach)
             end
         end
     end
+    return best,bottom
+end
+
+local function groundGap(ent,entry,u,v,direction,reach)
+    local low,high=ent:WorldSpaceAABB()
+    local center=ent:WorldSpaceCenter()
+    -- Start the fade ray at the caster's base. Measuring from its base but
+    -- sampling through its centre biases the gap on an angled light.
+    local foot=Vector(center.x,center.y,low.z)
+    local best,bottom=G.ShadowReceiverDepth(entry.ground,foot,u,v,direction)
+    if (not best or best-bottom>4) and G.ShadowHasFootprintContact(entry.ground,low,high) then return 0 end
     if not best then
-        local trace=util.TraceLine({start=center,endpos=center+direction*(reach*2+ent:BoundingRadius()),
+        local start=foot-direction*2
+        local trace=util.TraceLine({start=start,endpos=foot+direction*reach,
             mask=MASK_SOLID_BRUSHONLY})
         if not trace.Hit then return math.huge end
         best=trace.HitPos:Dot(direction)
@@ -436,7 +594,7 @@ local active={}
 local stats={ms=0,average=0,peak=0,casters=0,rebuilds=0}
 local diagnostics={}
 local probes=setmetatable({},{__mode='k'})
-local function update()
+local function update(eye)
     useResolution()
     active={}
     diagnostics={}
@@ -458,7 +616,6 @@ local function update()
     -- Settings that change the projected geometry belong in the tile key, or a
     -- caster that is standing still would keep geometry built for old settings.
     local frameKey=string.format('%d|%.3f,%.3f,%.3f|%.2f|%d,%.2f',index.revision,direction.x,direction.y,direction.z,strength,CELL,blur:GetFloat())
-    local eye=EyePos()
     local t1=SysTime()
     local candidates={}
     for ent in pairs(pool) do
@@ -533,6 +690,10 @@ local function update()
     for ent in pairs(casters) do if not seen[ent] then release(ent) end end
     stats.t_volumes=(SysTime()-t2)*1000
     if #active==0 then return end
+    -- These render targets store shadow multipliers. Scene auto-exposure
+    -- would brighten the silhouette and wash out the shadow on the receiver.
+    local sceneTone=render.GetToneMappingScaleLinear()
+    render.SetToneMappingScaleLinear(neutralTone)
     -- Silhouettes: a grey caster (1 - darkness) on white, one ortho cell each.
     local smooth=supersample:GetBool()
     local function silhouetteView(a,x,y,size)
@@ -579,26 +740,30 @@ local function update()
         render.PopRenderTarget()
     end
     render.SuppressEngineLighting(false)
-
+    render.SetToneMappingScaleLinear(sceneTone)
 end
 
--- The second argument (drawing skybox) is true for the main view on maps with
--- a 3D skybox (Coffee Break); only the third identifies the 3D skybox pass.
-hook.Add('PreDrawOpaqueRenderables','rf_geomod_shadows',function(depth,_,sky3d)
-    if depth or sky3d then return end
+-- Build the atlas from the main view before water renders. A reflection can
+-- draw opaque entities first, with a skybox origin and a water clip plane.
+hook.Add('RenderScene','rf_geomod_shadows',function(origin)
     local frame=FrameNumber()
     if frame==lastFrame then return end
     lastFrame=frame
     local started=SysTime()
-    update()
+    update(origin)
     stats.ms=(SysTime()-started)*1000 stats.casters=#active
     stats.average=stats.average*0.95+stats.ms*0.05 stats.peak=math.max(stats.peak,stats.ms)
 end)
 
 -- Multiply the surface by the atlas: white leaves it unchanged, the grey
 -- silhouette darkens it. (The engine ignores ONE_MINUS_SRC_COLOR here.)
+-- Only the third argument reliably identifies the 3D skybox pass.
 hook.Add('PostDrawOpaqueRenderables','rf_geomod_shadows',function(depth,_,sky3d)
-    if depth or sky3d or #active==0 then return end
+    if depth or sky3d then return end
+    if enabled:GetBool() and (not rShadows or rShadows:GetBool()) and not GetGlobal2Bool('RFGeoModShadowDisabled',false) then
+        drawWallShadows()
+    end
+    if #active==0 then return end
     render.SetMaterial(projected)
     render.OverrideDepthEnable(true,false)
     local debug=debugView:GetBool()
@@ -611,7 +776,7 @@ end)
 hook.Add('EntityRemoved','rf_geomod_shadows',function(ent) release(ent) pool[ent]=nil end)
 -- Why an entity does or does not cast this frame (QA and console debugging).
 local function explain(ent)
-    local ok,reason=isCaster(ent,EyePos())
+    local ok,reason=isCaster(ent,MainEyePos())
     local d=diagnostics[ent] or {}
     return {pool=pool[ent]==true,caster=ok==true,reason=not ok and reason or nil,hits=d.hits,
         shade=d.shade,vertices=d.vertices,gap=d.gap,active=casters[ent]~=nil}

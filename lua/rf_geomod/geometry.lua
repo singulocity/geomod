@@ -140,7 +140,31 @@ end end end
 
 local boreSides={.91,.98,.90,.96,.93,.99,.89,.95}
 
-function G.CutterPlanes(radius,seed,normal,bore)
+function G.CutterPlanes(radius,seed,normal,bore,ram)
+    if ram then
+        local right=ram.right:GetNormalized()
+        local outward=normal:GetNormalized()
+        local up=outward:Cross(right):GetNormalized()
+        local half=ram.half
+        local planes={{normal=outward,d=half.z},{normal=-outward,d=half.z}}
+        local function side(axis,distance)
+            -- A side plane is parallel to travel, so the far edge of
+            -- the opening follows the same path as the vehicle.
+            local n=axis-outward*(axis:Dot(ram.travel)/outward:Dot(ram.travel))
+            local length=n:Length()
+            planes[#planes+1]={normal=n/length,d=distance/length}
+        end
+        for a=-1,1,2 do
+            side(right*a,half.x)
+            side(up*a,half.y)
+            -- Bevel the clearance margin, leaving room for the vehicle's
+            -- projected box corners and reducing sharp corners in the wall.
+            for b=-1,1,2 do
+                side((right*a+up*b):GetNormalized(),(half.x+half.y-5)/math.sqrt(2))
+            end
+        end
+        return planes
+    end
     if bore and normal and normal:LengthSqr()>.5 then
         local axis=normal:GetNormalized()
         local reference=math.abs(axis.z)>.9 and Vector(1,0,0) or Vector(0,0,1)
@@ -172,7 +196,7 @@ function G.CutterPlanes(radius,seed,normal,bore)
         if rotation then n:Rotate(rotation) end
         planes[#planes+1]={normal=n,d=radius*(rotation and (0.88+random()*0.24) or 1)}
     end
-    if rotation and normal then
+    if rotation and normal and normal:LengthSqr()>.5 then
         -- Vary the silhouette without letting a wide first blast unexpectedly
         -- punch all the way through this wall. Depth follows the impact normal.
         local n=normal:GetNormalized()
@@ -180,6 +204,56 @@ function G.CutterPlanes(radius,seed,normal,bore)
         planes[#planes+1]={normal=-n,d=radius*(0.92+random()*0.08)}
     end
     return planes
+end
+
+-- A fixed crater centered on the contact point. Keeping the operation in the
+-- wall's coordinate frame lets the preview and replay use the same cutter.
+function G.ContactCut(point,radius)
+    return {
+        center=Vector(math.Round(point.x*8)/8,math.Round(point.y*8)/8,math.Round(point.z*8)/8),
+        radius=math.Clamp(tonumber(radius) or 48,6,150),seed=0,normal=Vector(),
+    }
+end
+
+function G.ContactFracture(point,radius)
+    local op=G.ContactCut(point,radius)
+    op.seed=math.random(1,65535)
+    return op
+end
+
+-- Contact fractures use the irregular cutter with no scorch projection
+-- normal. A fixed Tool Gun cut uses the same zero normal and seed zero.
+function G.IsContactFracture(op)
+    return (op.kind==nil or op.kind==G.OP_CUT) and not op.detach and
+        op.seed and op.seed>0 and op.normal and op.normal:LengthSqr()<.001
+end
+
+function G.SetRamShape(op,normal,right,half,travel)
+    if not isvector(normal) or not isvector(right) or not isvector(half) or not isvector(travel) then return false end
+    if not (normal:LengthSqr()>.99 and normal:LengthSqr()<1.01 and
+        right:LengthSqr()>.99 and right:LengthSqr()<1.01 and math.abs(normal:Dot(right))<.01) then return false end
+    if not (half.x>=16 and half.x<=180 and half.y>=16 and half.y<=150 and half.z>=6 and half.z<=165) then return false end
+    if not (travel:LengthSqr()>.99 and travel:LengthSqr()<1.01 and travel:Dot(normal)<-.64) then return false end
+    local function snap(v)
+        return Vector(math.Round(v.x*4096)/4096,math.Round(v.y*4096)/4096,math.Round(v.z*4096)/4096)
+    end
+    op.normal=snap(normal)
+    op.ram={right=snap(right),travel=snap(travel),
+        half=Vector(math.Round(half.x*8)/8,math.Round(half.y*8)/8,math.Round(half.z*8)/8)}
+    return true
+end
+
+function G.RamCutExtent(ram)
+    return ram.half.x+ram.half.y+ram.half.z*2
+end
+
+function G.ContactCutPreview()
+    local extent=Vector(2,2,2)
+    local cutter=G.Box(-extent,extent)
+    for _,plane in ipairs(G.CutterPlanes(1,0)) do
+        cutter=clip(cutter,plane.normal,plane.d)
+    end
+    return cutter.faces
 end
 
 local function mergeConvex(a,b)
@@ -292,10 +366,10 @@ local function outsideCutter(piece,planes,center)
     return false
 end
 
-function G.Subtract(pieces,center,radius,seed,normal,checkpoint,bore)
+function G.Subtract(pieces,center,radius,seed,normal,checkpoint,bore,extracted,ram)
     local output = {}
-    local planes=G.CutterPlanes(radius,seed,normal,bore)
-    local bound=seed and seed~=0 and radius*2 or radius
+    local planes=G.CutterPlanes(radius,seed,normal,bore,ram)
+    local bound=ram and G.RamCutExtent(ram) or (seed and seed~=0 and radius*2 or radius)
     for _, piece in ipairs(pieces) do
         if center.x+bound < piece.low.x or center.x-bound > piece.high.x or
            center.y+bound < piece.low.y or center.y-bound > piece.high.y or
@@ -316,7 +390,8 @@ function G.Subtract(pieces,center,radius,seed,normal,checkpoint,bore)
                 -- piece instead of accumulating partitions from a missed blast.
                 output[#output+1]=piece
             else
-                -- The remainder is inside every cutter plane and is discarded.
+                -- Blunt impacts can reuse the material inside the cutter.
+                if extracted then extracted[#extracted+1]=remaining end
                 for _,outside in ipairs(outsidePieces) do output[#output+1]=outside end
             end
         end
@@ -328,9 +403,49 @@ function G.Subtract(pieces,center,radius,seed,normal,checkpoint,bore)
     return output
 end
 
+function G.SubtractCut(pieces,op,checkpoint,extracted)
+    return G.Subtract(pieces,op.center,op.radius,op.seed,op.normal,checkpoint,op.bore,extracted,op.ram)
+end
+
 function G.Volume(pieces)
     local volume = 0 for _, p in ipairs(pieces) do volume = volume+p.volume end
     return volume
+end
+
+-- Split the extracted solid into a main slab and two smaller pieces. The
+-- planes lean through the wall instead of leaving square saw-cut sections.
+function G.FracturePieces(pieces,normal,checkpoint)
+    local reference=math.abs(normal.z)<.9 and Vector(0,0,1) or Vector(1,0,0)
+    local across=normal:Cross(reference):GetNormalized()
+    local first=(across+normal*.25):GetNormalized()
+    local second=(normal:Cross(across)-normal*.2):GetNormalized()
+    local function splitGroup(group,axis,fraction)
+        if #group==0 then return {},{} end
+        local low,high=math.huge,-math.huge
+        for _,piece in ipairs(group) do
+            for _,vertex in ipairs(piece.vertices) do
+                local distance=axis:Dot(vertex)
+                low,high=math.min(low,distance),math.max(high,distance)
+            end
+            if checkpoint then checkpoint() end
+        end
+        local lower,upper={},{}
+        local distance=low+(high-low)*fraction
+        for _,piece in ipairs(group) do
+            local a,b=split(piece,axis,distance)
+            if a then lower[#lower+1]=a end
+            if b then upper[#upper+1]=b end
+            if checkpoint then checkpoint() end
+        end
+        return lower,upper
+    end
+    local main,outer=splitGroup(pieces,first,.62)
+    local side,tip=splitGroup(outer,second,.5)
+    return {main,side,tip}
+end
+
+function G.DebrisDirection(sourceDelta,normal)
+    return sourceDelta and sourceDelta:LengthSqr()>.001 and sourceDelta:GetNormalized() or normal
 end
 
 function G.Trace(pieces,start,delta,extents)
@@ -538,7 +653,7 @@ end
 
 function G.ApplyOp(pieces,op,checkpoint)
     local kind=op.kind or G.OP_CUT
-    if kind==G.OP_CUT then return G.Subtract(pieces,op.center,op.radius,op.seed,op.normal,checkpoint,op.bore) end
+    if kind==G.OP_CUT then return G.SubtractCut(pieces,op,checkpoint) end
     local island=G.NearestIsland(G.Islands(pieces,nil,checkpoint),op.center)
     if not island then return nil,'No island for this operation.' end
     local member={} for _,i in ipairs(island.indices) do member[i]=true end
@@ -568,7 +683,7 @@ function G.CutsInFinalFrame(ops)
         local op=ops[i]
         local kind=op.kind or G.OP_CUT
         if kind==G.OP_KEEP then offset=offset+op.center
-        elseif kind==G.OP_CUT then
+        elseif kind==G.OP_CUT and not op.ram then
             table.insert(output,1,{center=op.center-offset,radius=op.radius,seed=op.seed,normal=op.normal,kind=kind})
         end
     end

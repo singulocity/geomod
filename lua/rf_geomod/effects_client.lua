@@ -41,7 +41,7 @@ local function make(emitter,material,position,velocity,life,size,growth,alpha,co
     return p
 end
 
-function G.PlayDestructionParticles(drill,position,normal,radius,profile)
+function G.PlayDestructionParticles(drill,position,normal,radius,profile,direction)
     if not particles:GetBool() then return 0 end
     local emitter=ParticleEmitter(position)
     if not emitter then return 0 end
@@ -50,6 +50,7 @@ function G.PlayDestructionParticles(drill,position,normal,radius,profile)
     local emitted=0
     local wet=bit.band(util.PointContents(position),CONTENTS_WATER)~=0
     local gravity=physenv.GetGravity()
+    direction=direction or normal
     -- Keep slow dust in front of the surviving surface. A spherical random
     -- offset can bury half the puffs inside the wall for their entire life.
     local function dustOrigin()
@@ -83,9 +84,11 @@ function G.PlayDestructionParticles(drill,position,normal,radius,profile)
             if p then emitted=emitted+1 end
         end
     end
-    for i=1,(drill and 3 or 25) do
+    local chips=drill and 3 or 25
+    for i=1,chips do
+        local scatter=VectorRand()*30
         local p=make(emitter,appearance.chip,position+normal*3+VectorRand()*radius*0.1,
-            normal*math.Rand(drill and 20 or 40,drill and 160 or 400)+VectorRand()*30,
+            direction*math.Rand(drill and 20 or 80,drill and 160 or 400)+scatter-direction*scatter:Dot(direction),
             drill and 0.8 or math.Rand(1,3),math.Rand(2,4),0,drill and 192 or 255,
             drill and Color(64,128,170) or Color(128,128,128),gravity)
         if p then p:SetCollide(true) p:SetBounce(0.25) emitted=emitted+1 end
@@ -102,5 +105,6 @@ function G.PlayDestructionParticles(drill,position,normal,radius,profile)
 end
 
 net.Receive('rf_geomod_effect',function()
-    G.PlayDestructionParticles(net.ReadBool(),net.ReadVector(),net.ReadNormal(),net.ReadFloat(),net.ReadString())
+    G.PlayDestructionParticles(net.ReadBool(),net.ReadVector(),net.ReadNormal(),net.ReadFloat(),net.ReadString(),
+        net.ReadNormal())
 end)

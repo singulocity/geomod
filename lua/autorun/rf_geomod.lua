@@ -39,6 +39,7 @@ if CLIENT then
 end
 if SERVER then
     include('rf_geomod/effects.lua')
+    include('rf_geomod/physics_impacts.lua')
     hook.Add('PlayerInitialSpawn','rf_geomod_join_state',function(ply)
         timer.Simple(3,function()
             if not IsValid(ply) then return end
