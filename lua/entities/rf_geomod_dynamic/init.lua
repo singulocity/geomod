@@ -123,6 +123,7 @@ function ENT:ResetWall()
 end
 
 function ENT:SendState(ply)
+    self:SetNWString('rf_geomod_effect_profile',G.WallEffectProfile(self))
     net.Start('rf_geomod_state') net.WriteEntity(self) net.WriteUInt(self.Revision or 0,16)
     net.WriteString(self.BrushSourceModel or '')
     net.WriteBool(self.DynamicWall==true) net.WriteBool(self.BoxSource==true)
@@ -440,7 +441,8 @@ function G.SpawnDetachedWall(wall,island,pieces)
     child.SeedPieces,child.SeedMaterials,child.EncodedSeed=localPieces,wall.WallMaterialNames,encoded
     local dynamic=wall:GetClass()=='rf_geomod_dynamic'
     child.WallKeyValues={hardness=wall.Hardness,cut_material=wall.CutMaterialName,cut_repeat=wall.CutRepeat,
-        surface_material=wall.SurfaceMaterialName,surface_repeat=wall.SurfaceRepeat,disable_physgun='0'}
+        surface_material=wall.SurfaceMaterialName,surface_repeat=wall.SurfaceRepeat,disable_physgun='0',
+        effects_profile=G.WallEffectProfile(wall)}
     child.IsChunk,child.FrozenWall=true,true
     child.GeoModSourceWall=wall
     if dynamic then

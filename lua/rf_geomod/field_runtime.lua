@@ -198,6 +198,7 @@ if SERVER then
     end
     function R.Send(wall,ply)
         if not IsValid(wall) or not wall.FieldData or not wall.FieldCatalogReady then return end
+        wall:SetNWString('rf_geomod_effect_profile',G.WallEffectProfile(wall))
         local bytes=assert(util.Compress(util.TableToJSON(snapshot(wall))))
         assert(#bytes<60000,'Field snapshot exceeds the supported packet size')
         net.Start(MSG) net.WriteUInt(#bytes,16) net.WriteData(bytes,#bytes)

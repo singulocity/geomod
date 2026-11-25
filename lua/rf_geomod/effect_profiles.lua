@@ -54,10 +54,11 @@ if SERVER then
     end
 
     function G.WallEffectProfile(wall)
-        if IsValid(wall) and wall.BoxSource then
-            local config=wall.WallKeyValues or {}
+        local config=IsValid(wall) and wall.WallKeyValues
+        if config and config.effects_profile then
             return G.EffectProfileID(config.effects_profile)
         end
+        if IsValid(wall) and wall.BoxSource then return 'stock' end
         return G.MapEffectProfile()
     end
 

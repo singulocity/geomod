@@ -27,10 +27,23 @@ function RFGeoMod.ScorchUV(projection,point)
         projection.c*x+projection.d*y+projection.ty
 end
 
-local material
-function RFGeoMod.GetScorchMaterial()
-    material=material or RFGeoMod.EffectMaterial(hook.Run('RFGeoModScorchMaterial')) or Material('geomod/scorch')
-    return material
+local materials={}
+local stockMaterial
+function RFGeoMod.GetScorchMaterial(profile)
+    local path=RFGeoMod.GetEffectProfile(profile).scorch
+    if isstring(path) then
+        if materials[path]==nil then materials[path]=RFGeoMod.EffectMaterial(path) or false end
+        if materials[path] then return materials[path] end
+    end
+    -- The mounted decal shader expects a world lightmap. Use its texture with
+    -- a shader that can project directly onto GeoMod's meshes.
+    stockMaterial=stockMaterial or CreateMaterial('rf_geomod_stock_scorch','UnlitGeneric',{
+        ['$basetexture']='decals/scorch1',
+        ['$translucent']='1',
+        ['$decal']='1',
+        ['$basetexturetransform']='center 0 0 scale 1 1 rotate 0 translate 0 0',
+    })
+    return stockMaterial
 end
 
 function RFGeoMod.ScorchPasses(cuts,normal,plane,sourceFace)
@@ -51,13 +64,17 @@ function RFGeoMod.ScorchPasses(cuts,normal,plane,sourceFace)
 end
 
 -- Accepted settings: 256-square texture, original world span, two alpha passes.
-function RFGeoMod.DrawScorch(mesh,passes)
-    local mat=RFGeoMod.GetScorchMaterial()
+function RFGeoMod.DrawScorches(wall,groups)
+    if #groups==0 then return end
+    local mat=RFGeoMod.GetScorchMaterial(wall:GetNWString('rf_geomod_effect_profile','stock'))
     mat:SetFloat('$alpha',1)
-    for layer=1,2 do
-        for _,matrix in ipairs(passes) do
-            mat:SetMatrix('$basetexturetransform',matrix)
-            render.SetMaterial(mat) mesh:Draw()
+    for _,group in ipairs(groups) do
+        for layer=1,2 do
+            for _,matrix in ipairs(group.passes) do
+                mat:SetMatrix('$basetexturetransform',matrix)
+                render.SetMaterial(mat)
+                group.mesh:Draw()
+            end
         end
     end
 end

@@ -161,7 +161,7 @@ function ENT:Draw(flags)
     drawMesh()
     render.SuppressEngineLighting(false)
     render.RenderFlashlights(drawMesh)
-    for _,group in ipairs(bundle.scorch) do G.DrawScorch(group.mesh,group.passes) end
+    G.DrawScorches(self,bundle.scorch)
     cam.PopModelMatrix()
     for decal in pairs(self.GeoModDecals or {}) do
         if IsValid(decal) then

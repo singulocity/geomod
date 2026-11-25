@@ -209,7 +209,7 @@ function R.Draw(ent)
         if b.baked then render.SetLightmapTexture(b.atlas.texture) end
         b.mesh:Draw()
     end
-    for _,s in ipairs(bundle.scorches) do G.DrawScorch(s.mesh,s.passes) end
+    G.DrawScorches(wall,bundle.scorches)
 end
 -- One projected-light pass for the visible field, rather than restarting the
 -- engine flashlight pass separately for every material of every chunk.
