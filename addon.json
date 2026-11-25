@@ -6,7 +6,9 @@
   ],
   "ignore": [
     "README.md",
-    "fgd/*"
+    "fgd/*",
+    "tools/*",
+    "hammer/*"
   ],
   "description": "GeoMod is a brush-based destruction system for Garry's Mod. Blast walls, floors and ceilings made from brushes with explosives and watch them break apart, with a Sandbox tool to place destructible walls, a Hammer entity for map makers, and swappable effect profiles."
 }
