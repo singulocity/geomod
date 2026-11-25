@@ -1,6 +1,6 @@
 # Destructible Walls for Garry’s Mod
 
-Blast holes through walls, floors and ceilings with any explosive, in the style of Red Faction's Geo-Mod: place destructible walls with the tool gun, or let mappers mark ordinary map brushes as destructible.
+Destroy walls in the style of Red Faction's Geo-Mod engine: place destructible walls with the tool gun, or let mappers mark ordinary map brushes as destructible. Blow them up or ram into them!
 
 ## Hammer
 This addon also allows mappers to place `func_geomod` brushes in their maps to designate that brush as destructible. It can get lighting and otherwise act as a solid brush. When broken I have seen NPCs walk through holes though that might be non-pathfinding behavior. Nodes currently calculate as if the wall isn't there.
@@ -8,11 +8,13 @@ This addon also allows mappers to place `func_geomod` brushes in their maps to d
 ### Prerequisites
 - All my testing/mapping was done with [Hammer++](https://ficool2.github.io/HammerPlusPlus-Website/download.html), I'd recommend it to you too! It's great for GMOD!
 - Powershell
-- My scripts use Python with NumPy to essentially double bake the lighting with and without the destructible brushes. I also use it to cache the geomod brushes for quick runtime fetching
+- My scripts use Python 3.15 with NumPy to essentially double bake the lighting with and without the destructible brushes. I also use Python to cache the geomod brushes for quick runtime fetching
 
-In **Tools > Options > Game Configurations**, add [geomod.fgd](fgd/geomod.fgd). Tie ordinary convex wall brushes to `func_geomod` and texture their faces as usual. Set the exposed interior material, repeat and hardness on the entity. Use my [GeoMod - Full](hammer/geomod_full.cfg) profile when done to build the map with the geomod brushes.
+In **Tools > Options > Game Configurations**, add [geomod.fgd](fgd/geomod.fgd). Tie ordinary convex wall brushes to `func_geomod` and texture their faces as usual. Set the exposed interior material, repeat and hardness on the entity.
 
 For a map-wide effect profile, place one `geomod_effects` point entity. In **Destruction profile**, enter `stock` or the ID of a profile registered by a mounted addon.
+
+Use my [GeoMod - Full](hammer/geomod_full.cfg) profile when done to build the map. You can import it by going to **File > Run Map... > Expert... > Edit next to the Configurations > Import** and then select the geomod_full.cfg file. You should see **GeoMod - Full** listed. Run your map with that, it will build the map normally, then bake the lighting twice, and finally run a small version of GMOD so it can cache the GeoMod brushes for quick retrieval later that you can include in your map. It's stored in your GMOD's `data/rf-geomod-cache/` folder.
 
 ## Destruction effects
 
@@ -43,6 +45,7 @@ end)
 These are known problems that likely won't be addressed.
 - Displacements are outside the supported brush format
 - A test map of size 1024x1024 where the whole map is func_geomod except 128x128 units in the middle revealed cut slowdowns after about 10 cuts in the 300ms range. Though it does not appear to get exponentially worse. Results may vary per machines
+- The dynamically made GeoMod walls (so the ones cut off of static walls, or from the tool gun) have a cap of 192 collision hull. This is to prevent a crash. So eventually those types of walls refuse to cut further. The static walls don't have this problem
 
 ## Resources used
 - [Red Faction Reversed](https://github.com/rafalh/rf-reversed) to get accurate hardness and crater values
