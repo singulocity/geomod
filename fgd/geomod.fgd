@@ -1,0 +1,26 @@
+// Load alongside garrysmod.fgd. Install the GeoMod addon for runtime destruction.
+@BaseClass = GeoModPhysgunProtection
+[
+    disable_physgun(choices) : "Disable Physics Gun" : 1 : "Prevent players and Lambda Players from picking up the intact brush and its runtime mesh." =
+    [
+        0 : "No"
+        1 : "Yes"
+    ]
+]
+
+@SolidClass base(Targetname, GeoModPhysgunProtection) = func_geomod : "Destructible GeoMod brushes. Shape and exterior materials come from the brushes and their face texture settings."
+[
+    vrad_brush_cast_shadows(choices) : "Block Lighting" : 1 : "Bake shadows from the intact brush during VRAD compilation. Baked shadows remain after GeoMod destruction. Recompile lighting after changing this setting." =
+    [
+        0 : "No"
+        1 : "Yes"
+    ]
+    cut_material(material) : "Broken interior material" : "concrete/concretewall036a" : "Material on freshly exposed cut faces; exterior textures are assigned normally in the face editor."
+    cut_repeat(float) : "Interior texture repeat (units)" : 128 : "World units per texture tile on cut faces."
+    hardness(float) : "Hardness (0-100)" : 50 : "0 = soft rock: large craters, light detached chunks. 50 = original crater size. 100 = hard concrete: blasts only chip it, heavy chunks."
+]
+
+@PointClass base(Targetname) size(-8 -8 -8, 8 8 8) color(220 165 80) = geomod_effects : "Map-wide GeoMod destruction effects"
+[
+    destruction_profile(string) : "Destruction profile" : "stock" : "Add one per map. Enter stock for base-game particles and sounds or a profile ID registered by an installed addon."
+]
