@@ -1,6 +1,6 @@
 # Destructible Walls for Garry’s Mod
 
-Blast holes through walls, floors and ceilings with any explosive, in the style of Red Faction's Geo-Mod: place destructible walls from the Sandbox tool, or let mappers mark ordinary Hammer brushes as destructible.
+Blast holes through walls, floors and ceilings with any explosive, in the style of Red Faction's Geo-Mod: place destructible walls with the tool gun, or let mappers mark ordinary map brushes as destructible.
 
 ## Hammer
 This addon also allows mappers to place `func_geomod` brushes in their maps to designate that brush as destructible. It can get lighting and otherwise act as a solid brush. When broken I have seen NPCs walk through holes though that might be non-pathfinding behavior. Nodes currently calculate as if the wall isn't there.
@@ -16,7 +16,7 @@ For a map-wide effect profile, place one `geomod_effects` point entity. In **Des
 
 ## Destruction effects
 
-The Tool Gun starts with **Stock**. Choose a profile from a mounted addon to use its effects on the placed wall. GeoMod's stock particles, rock sounds and cut material cover missing assets. Colliding rocks use the exposed wall material unless the profile supplies a rock material.
+The tool gun starts with **Stock**. Choose a profile from a mounted addon to use its effects on the placed wall. GeoMod's stock particles, rock sounds and cut material cover missing assets. Colliding rocks use the exposed wall material unless the profile supplies a rock material.
 
 Static walls use `stock` by default. Server operators can set `rf_geomod_effect_profile` for maps without a `geomod_effects` entity. A Hammer map's profile applies to static walls. Tool Gun walls use their own selection.
 
