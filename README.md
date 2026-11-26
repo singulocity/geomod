@@ -3,7 +3,7 @@
 Destroy walls in the style of Red Faction's Geo-Mod engine: place destructible walls with the tool gun, or let mappers mark ordinary map brushes as destructible. Blow them up or ram into them!
 
 ## Hammer
-This addon also allows mappers to place `func_geomod` brushes in their maps to designate that brush as destructible. It can get lighting and otherwise act as a solid brush. When broken I have seen NPCs walk through holes though that might be non-pathfinding behavior. Nodes currently calculate as if the wall isn't there.
+Assign `func_geomod` to brushes into your maps to designate that brush as destructible. It can get lighting and otherwise act as a solid brush. When broken I have seen NPCs walk through holes though that might be non-pathfinding behavior. AI Nodes currently calculate as if the wall isn't there.
 
 ### Prerequisites
 - All my testing/mapping was done with [Hammer++](https://ficool2.github.io/HammerPlusPlus-Website/download.html), I'd recommend it to you too! It's great for GMOD!
