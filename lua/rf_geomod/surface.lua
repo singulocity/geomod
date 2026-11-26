@@ -49,7 +49,7 @@ local function subtract(points,planes,normal)
             if #points<3 then break end
         end
     end
-    return fragments
+    return fragments,interior
 end
 
 local function polygonBounds(points)
@@ -127,18 +127,22 @@ local function signedVolume(points,origin)
     return volume/6
 end
 
-local function cutBoundary(volume,state,cut,checkpoint)
+local function cutBoundary(volume,state,cut,checkpoint,removedFaces)
     local previous=state.shapes
     state.shapes={}
     local removed=0
     local changed=0
     for _,shape in ipairs(previous) do
-        local fragments=overlaps(shape.low,shape.high,cut) and subtract(shape.points,cut.planes,shape.normal)
+        local fragments,interior
+        if overlaps(shape.low,shape.high,cut) then
+            fragments,interior=subtract(shape.points,cut.planes,shape.normal)
+        end
         if not fragments or fragments[1]==shape.points then
             state.shapes[#state.shapes+1]=shape
         else
             state.dirty[shape.key]=true
             changed=changed+1
+            if removedFaces then removedFaces[#removedFaces+1]={points=interior,normal=shape.normal} end
             removed=removed+signedVolume(shape.points,cut.center)
             for _,points in ipairs(fragments) do
                 removed=removed-signedVolume(points,cut.center)
@@ -179,6 +183,7 @@ local function cutBoundary(volume,state,cut,checkpoint)
                     for _,points in ipairs(fragments) do
                         removed=removed-signedVolume(points,cut.center)
                         changed=changed+1
+                        if removedFaces then removedFaces[#removedFaces+1]={points=points,normal=face.plane.normal} end
                         addShape(state,key,points,normal)
                     end
                 end
@@ -240,12 +245,12 @@ end
 
 -- Accept a static cut from the same boundary that will paint and collide.
 -- A replay applies the server's accepted history in its original order.
-function RFGeoMod.CutAuthoredBoundary(volume,op,checkpoint,replay)
+function RFGeoMod.CutAuthoredBoundary(volume,op,checkpoint,replay,removedFaces)
     local state=boundaryState(volume,checkpoint)
     local shapes,dirty=state.shapes,state.dirty
     state.dirty={}
     local cut=cutter(op)
-    local removed,changed=cutBoundary(volume,state,cut,checkpoint)
+    local removed,changed=cutBoundary(volume,state,cut,checkpoint,removedFaces)
     if not replay and removed<=EPS then
         state.shapes,state.dirty=shapes,dirty
         return 0,0

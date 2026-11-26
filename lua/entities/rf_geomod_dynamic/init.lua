@@ -38,6 +38,9 @@ local maxChunks=CreateConVar('rf_geomod_max_chunks','48',FCVAR_ARCHIVE,
     'Maximum live detached GeoMod chunks; further detached parts become temporary rocks.',0,256)
 -- Broken parts smaller than this (cubic units) shatter into temporary rocks.
 local MIN_CHUNK_VOLUME=1000
+local CRUSHED_CHUNK_FRACTION=1/3
+local MAX_CRUSH_VOLUME=64*64*16
+local MAX_CRUSH_SPAN=96
 local MAX_CHUNKS_PER_SPLIT=8
 G.Chunks=G.Chunks or {}
 
@@ -214,7 +217,7 @@ function ENT:ScheduleCuts()
     end)
 end
 
-function ENT:QueueCarve(position,normal,radius,effectOrigin,onComplete,travel,contact,fracture)
+function ENT:QueueCarve(position,normal,radius,effectOrigin,onComplete,travel,contact,fracture,impact)
     if not self.Pieces then return false end
     if (self.CutCount or 0)>=G.MaxCuts or #self.Cuts>=G.MaxOps-1 then
         self.LastCutResult='cut_history_limit'
@@ -225,7 +228,7 @@ function ENT:QueueCarve(position,normal,radius,effectOrigin,onComplete,travel,co
     self.CutRequests=self.CutRequests or {}
     self.CutRequests[#self.CutRequests+1]={position=position,normal=normal,radius=radius,
         effectOrigin=effectOrigin,seed=contact and contact.seed or math.random(1,65535),
-        done=onComplete,travel=travel,contact=contact,fracture=fracture}
+        done=onComplete,travel=travel,contact=contact,fracture=fracture,impact=impact}
     self.PendingCuts=(self.PendingCuts or 0)+1
     self:NextThink(CurTime())
     self:ScheduleCuts()
@@ -237,12 +240,12 @@ function ENT:CarveAt(position,normal,radius,effectOrigin,onComplete)
         self:WorldToLocal(effectOrigin or position),onComplete)
 end
 
-function ENT:CutContact(point,normal,radius,fracture)
+function ENT:CutContact(point,normal,radius,fracture,impact)
     local position=self:WorldToLocal(point)
     local direction=self:WorldToLocal(self:GetPos()+normal)
     local sourceDirection=fracture and self:WorldToLocal(self:GetPos()+fracture)
     local op=fracture and G.ContactFracture(position,radius) or G.ContactCut(position,radius)
-    return self:QueueCarve(position,direction,radius,nil,nil,nil,op,sourceDirection)
+    return self:QueueCarve(position,direction,radius,nil,nil,nil,op,sourceDirection,impact)
 end
 
 function ENT:PhysicsCollide(data)
@@ -273,15 +276,27 @@ function ENT:PlanCut(pieces,request,checkpoint)
         op={kind=G.OP_CUT,center=snapVector(position+normal*radius*.4,8),
             radius=radius,seed=request.seed,normal=snapVector(normal,4096),bore=false}
     end
-    local extracted=request.fracture and {}
-    local remaining,err=G.SubtractCut(pieces,op,checkpoint,extracted)
+    local debrisPieces={}
+    local remaining,err=G.SubtractCut(pieces,op,checkpoint,debrisPieces)
     if not remaining then return nil,'complexity_limit',err end
+    local extracted=request.fracture and debrisPieces
     local remainingVolume=G.Volume(remaining)
-    local removed=G.Volume(pieces)-remainingVolume
+    local totalVolume=G.Volume(pieces)
+    local removed=totalVolume-remainingVolume
     if removed<.1 then return nil,'no_volume_removed' end
-    if self:IsDynamicWall() and remainingVolume<MIN_CHUNK_VOLUME then
-        -- No collider or solid fragments for a remnant below the chunk limit.
-        remaining,extracted={},nil
+    local crushed=false
+    if self.IsChunk and request.impact and totalVolume<=MAX_CRUSH_VOLUME
+        and removed>=totalVolume*CRUSHED_CHUNK_FRACTION then
+        -- Use the pre-cut size. A thin but long slab can have little volume
+        -- and should still break into solid pieces.
+        local low,high=G.Bounds(pieces)
+        local size=high-low
+        crushed=math.max(size.x,size.y,size.z)<=MAX_CRUSH_SPAN
+    end
+    if self:IsDynamicWall() and (crushed or remainingVolume<MIN_CHUNK_VOLUME) then
+        -- A severe impact consumes a loose chunk rather than making more
+        -- solid pieces. The standard destruction effect supplies its debris.
+        remaining,extracted,debrisPieces={},nil,pieces
         removed=removed+remainingVolume
     end
     local hulls,failure=self:PrepareCollision(remaining,checkpoint)
@@ -289,7 +304,8 @@ function ENT:PlanCut(pieces,request,checkpoint)
     local sourceDirection=request.fracture or (request.travel and -request.travel)
         or ((request.effectOrigin or request.position)-position)
     return {pieces=remaining,hulls=hulls,op=op,origin=request.effectOrigin or position,normal=normal,
-        direction=G.DebrisDirection(sourceDirection,normal),removed=removed,extracted=extracted}
+        direction=G.DebrisDirection(sourceDirection,normal),removed=removed,extracted=extracted,
+        debrisPieces=debrisPieces,impact=request.impact}
 end
 
 function ENT:ApplyCuts(job,checkpoint)
@@ -333,18 +349,22 @@ function ENT:ApplyCuts(job,checkpoint)
             if IsValid(fallback) then fallback:Remove() end
             self:QueueState()
             hook.Run('RFGeoModGeometryChanged',self)
+            local landing
             for _,cut in ipairs(accepted) do
+                if cut.impact and cut.impact.landing then landing=cut.impact end
+                local through=G.ContinuePropThroughCut(self,cut.impact)
                 if cut.extracted then
-                    G.SpawnImpactChunks(self,cut.extracted,cut.origin,cut.normal,cut.op.radius,checkpoint)
+                    G.SpawnImpactChunks(self,cut.extracted,cut.origin,cut.normal,cut.op.radius,checkpoint,cut.impact,through)
                 end
                 if G.EmitDestruction then
                     local origin=self:LocalToWorld(cut.origin)
                     local normal=(self:LocalToWorld(cut.normal)-self:GetPos()):GetNormalized()
                     local direction=(self:LocalToWorld(cut.direction)-self:GetPos()):GetNormalized()
-                    G.EmitDestruction(self,origin,normal,cut.op.radius,cut.removed,checkpoint,direction)
+                    G.EmitDestruction(self,origin,normal,cut.op.radius,cut.removed,checkpoint,direction,cut.debrisPieces)
                 end
             end
-            self:ProcessSplit(job,checkpoint)
+            self:ProcessSplit(job,checkpoint,landing)
+            if landing then G.LimitFractureRebound(self,landing) end
         else
             self:BuildPhysics(self.Pieces)
             for _,request in ipairs(processed) do
@@ -373,15 +393,15 @@ function ENT:CachedIslands(checkpoint)
     return cache.islands
 end
 
-function ENT:ShatterIsland(island)
-    if not G.SpawnFragment then return end
-    local size=math.Clamp(island.volume^(1/3)*0.5,2,10)
-    local count=math.Clamp(math.ceil(island.volume/(size^3*8)),1,3)
-    local world=self:LocalToWorld(island.centroid)
-    for _=1,count do
-        G.SpawnFragment(world+VectorRand()*size,VectorRand()*60+Vector(0,0,40),size,self.CutMaterialName,nil,
-            G.WallEffectProfile(self))
-    end
+local function islandPieces(pieces,island)
+    local members={}
+    for _,index in ipairs(island.indices) do members[#members+1]=pieces[index] end
+    return members
+end
+
+function ENT:ShatterIsland(island,members,checkpoint)
+    G.EmitRockFragments(self,self:LocalToWorld(island.centroid),vector_up,island.volume^(1/3),
+        island.volume,checkpoint,nil,members)
 end
 
 -- A chunk joins every undo entry that holds the wall it broke from, so undoing
@@ -440,7 +460,7 @@ function ENT:SpawnChunk(baseOps,island,pieces,checkpoint)
     end
     shareUndo(self,child)
     G.Chunks[#G.Chunks+1]=child
-    return true
+    return child
 end
 
 function G.SpawnDetachedWall(wall,island,pieces)
@@ -483,7 +503,7 @@ function G.SpawnDetachedWall(wall,island,pieces)
     return child
 end
 
-function G.SpawnImpactChunks(wall,extracted,point,normal,radius,checkpoint)
+function G.SpawnImpactChunks(wall,extracted,point,normal,radius,checkpoint,impact,through)
     if liveChunks()>=maxChunks:GetInt() then return end
     local parts={}
     for _,pieces in ipairs(G.FracturePieces(extracted,normal,checkpoint)) do
@@ -500,6 +520,7 @@ function G.SpawnImpactChunks(wall,extracted,point,normal,radius,checkpoint)
     local parentPhysics=dynamic and wall:GetPhysicsObject()
     local worldPoint=dynamic and wall:LocalToWorld(point) or point
     local outward=dynamic and (wall:LocalToWorld(normal)-wall:GetPos()):GetNormalized() or normal
+    local siblings={}
     wall.GeoModNextImpact=math.max(wall.GeoModNextImpact or 0,CurTime()+.14)
     for index=1,math.min(#parts,3) do
         local part=parts[index]
@@ -509,17 +530,30 @@ function G.SpawnImpactChunks(wall,extracted,point,normal,radius,checkpoint)
             local offset=child:GetPos()-worldPoint
             local spread=(offset-outward*offset:Dot(outward))*(60/radius)
             local inherited=IsValid(parentPhysics) and parentPhysics:GetVelocityAtPoint(child:GetPos()) or Vector()
+            local kick=outward*55
+            if impact and impact.landing and IsValid(parentPhysics) then
+                local rebound=math.max(parentPhysics:GetVelocity():Dot(outward),0)
+                inherited=inherited-outward*math.max(inherited:Dot(outward)-rebound,0)
+                kick=vector_origin
+            elseif through then
+                kick=impact.velocity:GetNormalized()*math.min(impact.velocity:Length()*.18,160)
+            end
             -- The launch is part of the original impact. Let overlapping
             -- fragments collide and settle without generating more cuts.
             child.GeoModImpactEjected=true
             physics:EnableMotion(true)
-            physics:SetVelocity(inherited+outward*55+spread)
+            physics:SetVelocity(inherited+kick+spread)
             physics:Wake()
+            if impact and impact.landing then G.LimitFractureRebound(child,impact) end
+            if dynamic then G.SeparateFractureBodies(child,wall) end
+            if impact then G.SeparateFractureBodies(child,impact.prop) end
+            for _,sibling in ipairs(siblings) do G.SeparateFractureBodies(child,sibling) end
+            siblings[#siblings+1]=child
         end
     end
 end
 
-function ENT:ProcessSplit(job,checkpoint)
+function ENT:ProcessSplit(job,checkpoint,landing)
     if self:IsPlayerHolding() then self.PendingSplit=true return end
     local pieces=self.Pieces or {}
     local dynamic=self:IsDynamicWall()
@@ -534,7 +568,10 @@ function ENT:ProcessSplit(job,checkpoint)
     local largest=islands[1]
     for _,island in ipairs(islands) do if island.volume>largest.volume then largest=island end end
     if dynamic and largest.volume<MIN_CHUNK_VOLUME then
-        for _,island in ipairs(islands) do self:ShatterIsland(island) checkpoint() end
+        for _,island in ipairs(islands) do
+            self:ShatterIsland(island,islandPieces(pieces,island),checkpoint)
+            checkpoint()
+        end
         self:Remove()
         return
     end
@@ -573,14 +610,19 @@ function ENT:ProcessSplit(job,checkpoint)
     self:QueueState()
     hook.Run('RFGeoModGeometryChanged',self)
     local spawned=0
+    local siblings={}
     for _,island in ipairs(detached) do
-        local members={}
-        for _,index in ipairs(island.indices) do members[#members+1]=pieces[index] end
-        if island.volume>=MIN_CHUNK_VOLUME and spawned<MAX_CHUNKS_PER_SPLIT and liveChunks()<maxChunks:GetInt()
-            and self:SpawnChunk(baseOps,island,members,checkpoint) then
+        local members=islandPieces(pieces,island)
+        local child=island.volume>=MIN_CHUNK_VOLUME and spawned<MAX_CHUNKS_PER_SPLIT
+            and liveChunks()<maxChunks:GetInt() and self:SpawnChunk(baseOps,island,members,checkpoint)
+        if IsValid(child) then
             spawned=spawned+1
+            if landing then G.LimitFractureRebound(child,landing) end
+            G.SeparateFractureBodies(child,self)
+            for _,sibling in ipairs(siblings) do G.SeparateFractureBodies(child,sibling) end
+            siblings[#siblings+1]=child
         else
-            self:ShatterIsland(island)
+            self:ShatterIsland(island,members,checkpoint)
         end
         checkpoint()
     end

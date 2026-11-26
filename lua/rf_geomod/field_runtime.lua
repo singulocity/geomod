@@ -407,7 +407,8 @@ if SERVER then
                             if not remaining then extracted=nil end
                         end
                     end
-                    local removed,changed=G.CutAuthoredBoundary(wall.FieldVolume,op,checkpoint)
+                    local removedFaces=G.EffectsEnabled:GetBool() and {} or nil
+                    local removed,changed=G.CutAuthoredBoundary(wall.FieldVolume,op,checkpoint,false,removedFaces)
                     if changed>0 then
                         retireNative(wall)
                         wall.Cuts[#wall.Cuts+1]=op
@@ -416,6 +417,7 @@ if SERVER then
                         R.Send(wall)
                         accepted[#accepted+1]={wall=wall,dirty=0,changed=changed,r=op.radius,cpu=job:Time()-began,
                             removed=removed,extracted=extracted,fracture=candidate.fracture,direction=candidate.direction,
+                            debrisPieces=removedFaces and {{faces=removedFaces}},
                             blastSource=op.scorch_origin}
                     end
                 end
@@ -454,7 +456,7 @@ if SERVER then
                             direction=cut.blastSource-surface
                         end
                     end
-                    G.EmitDestruction(wall,origin,outward,cut.r,cut.removed,checkpoint,direction)
+                    G.EmitDestruction(wall,origin,outward,cut.r,cut.removed,checkpoint,direction,cut.debrisPieces)
                 end
             end end
         end,done,false,true,done)
@@ -479,10 +481,10 @@ if SERVER then
         end end
         return queueCarves(candidates,normal,effectOrigin or point)
     end
-    function G.CutContact(wall,point,normal,radius,fracture)
+    function G.CutContact(wall,point,normal,radius,fracture,impact)
         if not IsValid(wall) then return false end
         if wall:GetClass()=='rf_geomod_dynamic' then
-            return wall:CutContact(point,normal,radius,fracture)
+            return wall:CutContact(point,normal,radius,fracture,impact)
         end
         if not R.groups[wall] or not wall.FieldReady or wall.ContactCutPending then return false end
         local op=fracture and G.ContactFracture(point,radius) or G.ContactCut(point,radius)

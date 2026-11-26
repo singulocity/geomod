@@ -700,8 +700,8 @@ function G.HardnessCraterScale(hardness)
     if hardness<=50 then return Lerp(hardness/50,1.5,1) end
     return Lerp((hardness-50)/50,1,0.3)
 end
-local CUBIC_INCH_M3,MASS_SCALE=1.6387e-5,0.25
+local CUBIC_INCH_M3=1.6387e-5
 function G.HardnessMass(volume,hardness)
     local rho=500+G.ClampHardness(hardness)*30 -- kg/m^3, 500 (pumice-like) to 3500
-    return math.Clamp(volume*CUBIC_INCH_M3*rho*MASS_SCALE,1,50000)
+    return math.Clamp(volume*CUBIC_INCH_M3*rho,1,50000)
 end

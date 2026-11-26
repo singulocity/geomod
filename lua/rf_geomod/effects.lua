@@ -45,27 +45,83 @@ function G.SpawnFragment(position,velocity,radius,material,seed,profile)
     return rock
 end
 
-function G.EmitDestruction(wall,position,normal,radius,removedVolume,checkpoint,direction)
-    if not G.EffectsEnabled:GetBool() then return end
-    normal=normal:GetNormalized()
-    direction=G.DebrisDirection(direction,normal)
-    local profile=G.WallEffectProfile(wall)
-    event('cut',position,normal,radius,profile,direction)
-    local count=math.Clamp(math.ceil(removedVolume/64000*6),4,18)
-    local tangent=normal:Cross(math.abs(normal.z)<0.9 and vector_up or Vector(1,0,0)):GetNormalized()
-    local other=normal:Cross(tangent)
-    for i=1,count do
-        local size=(0.05+math.Rand(0,1)^3*0.2)*40
-        local pos=position+normal*(size*2+4)+tangent*math.Rand(-radius*0.35,radius*0.35)+other*math.Rand(-radius*0.35,radius*0.35)
-        local extent=Vector(size,size,size)
-        local clear=util.TraceHull({start=pos,endpos=pos,mins=-extent,maxs=extent,mask=MASK_SOLID})
-        if not clear.StartSolid then
-            local scatter=VectorRand()*65+vector_up*math.Rand(20,90)
-            local velocity=direction*math.Rand(100,280)+scatter-direction*scatter:Dot(direction)
-            G.SpawnFragment(pos,velocity,size,wall.CutMaterialName,nil,profile)
+local function debrisFaces(pieces,normal,checkpoint)
+    local faces,area={},0
+    for _,piece in ipairs(pieces or {}) do
+        for _,face in ipairs(piece.faces) do
+            local facing=face.normal:Dot(normal)
+            if facing>.05 then
+                local points=face.points
+                local a=points[1]
+                for i=2,#points-1 do
+                    local b,c=points[i],points[i+1]
+                    local weight=(b-a):Cross(c-a):Length()*facing
+                    if weight>.001 then
+                        area=area+weight
+                        faces[#faces+1]={a=a,b=b,c=c,area=area}
+                    end
+                end
+            end
         end
         if checkpoint then checkpoint() end
     end
+    return faces,area
+end
+
+function G.EmitRockFragments(wall,position,normal,radius,removedVolume,checkpoint,direction,pieces)
+    if not G.EffectsEnabled:GetBool() then return end
+    local count=math.Clamp(math.ceil(2*(removedVolume/4000)^(2/3)),1,24)
+    local maxSize=math.Clamp((removedVolume/count)^(1/3)*.45,2,10)
+    local profile=G.WallEffectProfile(wall)
+    local transform,localNormal=nil,normal
+    if pieces and wall:GetClass()=='rf_geomod_dynamic' then
+        local origin,angles=wall:GetPos(),wall:GetAngles()
+        transform=function(point) return LocalToWorld(point,angle_zero,origin,angles) end
+        localNormal=wall:WorldToLocal(origin+normal)
+    end
+    local faces,area=debrisFaces(pieces,localNormal,checkpoint)
+    local tangent=normal:Cross(math.abs(normal.z)<0.9 and vector_up or Vector(1,0,0)):GetNormalized()
+    local other=normal:Cross(tangent)
+    local faceIndex=1
+    for i=1,count do
+        local size=2+(maxSize-2)*math.Rand(0,1)^3
+        local sampleArea=area*(i-.5)/count
+        while faces[faceIndex] and faces[faceIndex].area<sampleArea do faceIndex=faceIndex+1 end
+        local face=faces[faceIndex]
+        for _=1,3 do
+            local point
+            if face then
+                -- One stratified area band per rock; use actual triangles so
+                -- concave cuts and holes don't emit from empty space.
+                local s,t=math.sqrt(math.Rand(0,1)),math.Rand(0,1)
+                point=face.a*(1-s)+face.b*(s*(1-t))+face.c*(s*t)
+                if transform then point=transform(point) end
+            else
+                point=position+tangent*math.Rand(-radius*.35,radius*.35)+other*math.Rand(-radius*.35,radius*.35)
+            end
+            local pos=point+normal*(size*2+4)
+            local extent=Vector(size,size,size)
+            local clear=util.TraceHull({start=pos,endpos=pos,mins=-extent,maxs=extent,mask=MASK_SOLID})
+            if not clear.StartSolid then
+                local velocity=VectorRand()*60+vector_up*40
+                if direction then
+                    local scatter=VectorRand()*65+vector_up*math.Rand(20,90)
+                    velocity=direction*math.Rand(100,280)+scatter-direction*scatter:Dot(direction)
+                end
+                G.SpawnFragment(pos,velocity,size,wall.CutMaterialName,nil,profile)
+                break
+            end
+        end
+        if checkpoint then checkpoint() end
+    end
+end
+
+function G.EmitDestruction(wall,position,normal,radius,removedVolume,checkpoint,direction,pieces)
+    if not G.EffectsEnabled:GetBool() then return end
+    normal=normal:GetNormalized()
+    direction=G.DebrisDirection(direction,normal)
+    event('cut',position,normal,radius,G.WallEffectProfile(wall),direction)
+    G.EmitRockFragments(wall,position,normal,radius,removedVolume,checkpoint,direction,pieces)
 end
 
 hook.Add('PostCleanupMap','rf_geomod_fragment_cleanup',function() G.DebrisPool={} end)
