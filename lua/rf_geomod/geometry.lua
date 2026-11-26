@@ -701,7 +701,15 @@ function G.HardnessCraterScale(hardness)
     return Lerp((hardness-50)/50,1,0.3)
 end
 local CUBIC_INCH_M3=1.6387e-5
-function G.HardnessMass(volume,hardness)
+G.WeightMultiplierLimits={0.05,2}
+function G.ClampWeightMultiplier(value)
+    value=tonumber(value)
+    if not value or value~=value then return 1 end
+    return math.Clamp(value,G.WeightMultiplierLimits[1],G.WeightMultiplierLimits[2])
+end
+
+function G.HardnessMass(volume,hardness,weightMultiplier)
     local rho=500+G.ClampHardness(hardness)*30 -- kg/m^3, 500 (pumice-like) to 3500
-    return math.Clamp(volume*CUBIC_INCH_M3*rho,1,50000)
+    local standardMass=math.Clamp(volume*CUBIC_INCH_M3*rho,1,50000)
+    return math.Clamp(standardMass*G.ClampWeightMultiplier(weightMultiplier),1,50000)
 end

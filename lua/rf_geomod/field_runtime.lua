@@ -417,7 +417,7 @@ if SERVER then
                         R.Send(wall)
                         accepted[#accepted+1]={wall=wall,dirty=0,changed=changed,r=op.radius,cpu=job:Time()-began,
                             removed=removed,extracted=extracted,fracture=candidate.fracture,direction=candidate.direction,
-                            debrisPieces=removedFaces and {{faces=removedFaces}},
+                            debrisPieces=removedFaces and {{faces=removedFaces}},rockMotion=candidate.rockMotion,
                             blastSource=op.scorch_origin}
                     end
                 end
@@ -439,7 +439,7 @@ if SERVER then
                     wall.DetachAnchor=supported(wall,wall.InitialPieces,{},checkpoint)
                 end
                 if cut.extracted then
-                    G.SpawnImpactChunks(wall,cut.extracted,effectOrigin,normal,cut.r,checkpoint)
+                    cut.ejected=G.SpawnImpactChunks(wall,cut.extracted,effectOrigin,normal,cut.r,checkpoint)
                 end
                 detachUnsupported(wall,checkpoint)
             end end
@@ -456,13 +456,13 @@ if SERVER then
                             direction=cut.blastSource-surface
                         end
                     end
-                    G.EmitDestruction(wall,origin,outward,cut.r,cut.removed,checkpoint,direction,cut.debrisPieces)
+                    G.EmitDestruction(wall,origin,outward,cut.r,cut.removed,checkpoint,direction,cut.debrisPieces,cut.rockMotion,cut.ejected)
                 end
             end end
         end,done,false,true,done)
         return true
     end
-    function R.Carve(point,normal,radius,seed,effectOrigin,atOrigin,scorchOrigin,direction)
+    function R.Carve(point,normal,radius,seed,effectOrigin,atOrigin,scorchOrigin,direction,blast)
         normal=normal:GetNormalized()
         radius=math.Clamp(tonumber(radius) or 52,6,150)
         seed=seed or math.random(1,2147483646)
@@ -476,7 +476,7 @@ if SERVER then
             if center.x+bound>=low.x and center.x-bound<=high.x and center.y+bound>=low.y and center.y-bound<=high.y and
                 center.z+bound>=low.z and center.z-bound<=high.z then
                 local op={center=center,radius=scaled,seed=seed,normal=normal,scorch_origin=scorchOrigin}
-                candidates[#candidates+1]={wall=wall,op=op,direction=direction}
+                candidates[#candidates+1]={wall=wall,op=op,direction=direction,rockMotion=blast and 'blast'}
             end
         end end
         return queueCarves(candidates,normal,effectOrigin or point)
@@ -489,7 +489,9 @@ if SERVER then
         if not R.groups[wall] or not wall.FieldReady or wall.ContactCutPending then return false end
         local op=fracture and G.ContactFracture(point,radius) or G.ContactCut(point,radius)
         wall.ContactCutPending=true
-        return queueCarves({{wall=wall,op=op,fracture=fracture}},normal:GetNormalized(),point,function()
+        local rockMotion=impact and impact.rockDirection or (not fracture and 'scatter')
+        local candidate={wall=wall,op=op,fracture=fracture,rockMotion=rockMotion}
+        return queueCarves({candidate},normal:GetNormalized(),point,function()
             if IsValid(wall) then wall.ContactCutPending=nil end
         end)
     end
@@ -507,7 +509,7 @@ if SERVER then
             local velocity=inflictor:GetVelocity()
             if velocity:Dot(normal)<0 then direction=-velocity end
         end
-        return R.Carve(position,normal,radius,nil,position,originIsCenter,scorchOrigin,direction)
+        return R.Carve(position,normal,radius,nil,position,originIsCenter,scorchOrigin,direction,true)
     end
     function R.Damage(wall,info)
         wall.DamageEvents=(wall.DamageEvents or 0)+1

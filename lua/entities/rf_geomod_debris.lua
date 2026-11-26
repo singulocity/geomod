@@ -24,7 +24,9 @@ if SERVER then
         self:DrawShadow(false)
         local radius=math.Clamp(self:GetRockRadius(),2,10)
         self:SetRockRadius(radius)
-        self:PhysicsInitSphere(radius,'concrete')
+        local surface
+        surface,self.PhysicsSurfaceData=RFGeoMod.MaterialPhysicsSurface(self.ImpactMaterial or self:GetRockMaterial())
+        self:PhysicsInitSphere(radius,surface)
         self:SetMoveType(MOVETYPE_VPHYSICS) self:SetSolid(SOLID_VPHYSICS)
         self:SetCollisionBounds(Vector(-radius,-radius,-radius),Vector(radius,radius,radius))
         self:SetCollisionGroup(COLLISION_GROUP_DEBRIS)
@@ -51,7 +53,8 @@ if SERVER then
         end
         if data.Speed>80 and (self.RFNextImpact or 0)<CurTime() then
             self.RFNextImpact=CurTime()+0.12
-            self:EmitSound(RFGeoMod.RockImpactSound(self.EffectProfile),65,100,0.6)
+            local sound=RFGeoMod.RockImpactSound(self.EffectProfile,self.PhysicsSurfaceData,data.Speed)
+            if sound then self:EmitSound(sound,65,100,0.6) end
         end
     end
 

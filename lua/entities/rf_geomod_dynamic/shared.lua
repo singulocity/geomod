@@ -47,6 +47,7 @@ function ENT:ApplyWallConfiguration(config)
     -- render bounds to the map origin, so the wall vanished once off-screen.
     if not self.BrushSourceModel then self.Low,self.High=low,high end
     self.Hardness=RFGeoMod.ClampHardness(config.hardness)
+    self.WeightMultiplier=RFGeoMod.ClampWeightMultiplier(config.weight_multiplier)
     self.SurfaceMaterialName,self.CutMaterialName=surface,interior
     self.SurfaceRepeat,self.CutRepeat=surfaceRepeat,cutRepeat
     if changed then self.WallMaterialNames={surface,interior} end
@@ -233,8 +234,10 @@ function ENT:BuildPhysics(pieces,checkpoint,hulls)
     if not IsValid(physics) then return false end
     physics:SetPos(pos) physics:SetAngles(ang)
     if dynamic and SERVER then
-        physics:SetMaterial('concrete')
-        physics:SetMass(RFGeoMod.HardnessMass(RFGeoMod.Volume(pieces),self.Hardness))
+        local surface
+        surface,self.PhysicsSurfaceData=RFGeoMod.MaterialPhysicsSurface(self.CutMaterialName)
+        physics:SetMaterial(surface)
+        physics:SetMass(RFGeoMod.HardnessMass(RFGeoMod.Volume(pieces),self.Hardness,self.WeightMultiplier))
         if motion==nil then motion=not self.FrozenWall end
         physics:EnableMotion(motion)
         if motion then

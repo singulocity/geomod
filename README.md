@@ -18,7 +18,7 @@ Use my [GeoMod - Full](hammer/geomod_full.cfg) profile when done to build the ma
 
 ## Destruction effects
 
-The tool gun starts with **Stock**. Choose a profile from a mounted addon to use its effects on the placed wall. GeoMod falls back to stock particles, rock sounds and Half-Life 2's first scorch mark when a profile asset is missing. Colliding rocks use the exposed wall material unless the profile supplies a rock material.
+The tool gun starts with **Stock**. Choose a profile from a mounted addon to use its effects on the placed wall. GeoMod falls back to stock particles and Half-Life 2's first scorch mark when a profile asset is missing. Temporary debris uses the exposed inside material for its collision sounds, with concrete as the fallback for materials without a valid surface property. Profiles can override the debris texture with `rock_material` and the impact sounds with `rock_sounds`.
 
 Static walls use `stock` by default. Server operators can set `rf_geomod_effect_profile` for maps without a `geomod_effects` entity. A Hammer map's profile applies to static walls. Tool Gun walls use their own selection.
 

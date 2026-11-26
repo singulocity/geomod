@@ -12,6 +12,7 @@ local DEFAULTS = {
     width = "128",
     height = "128",
     hardness = "50",
+    weight_multiplier = "1",
     frozen = "0",
     surface_repeat = "128",
     cut_repeat = "128",
@@ -54,6 +55,7 @@ function TOOL:LeftClick(trace)
     local config = RFGeoMod.SanitizeWallConfig({
         thickness = self:GetClientNumber("thickness"), width = self:GetClientNumber("width"),
         height = self:GetClientNumber("height"), hardness = self:GetClientNumber("hardness"),
+        weight_multiplier = self:GetClientNumber("weight_multiplier"),
         surface_material = self:GetClientInfo("surface_material"), cut_material = self:GetClientInfo("cut_material"),
         surface_repeat = self:GetClientNumber("surface_repeat"), cut_repeat = self:GetClientNumber("cut_repeat"),
         effects_profile = self:GetClientInfo("effects_profile"),
@@ -70,13 +72,14 @@ function TOOL:LeftClick(trace)
     return true
 end
 
--- Copy materials, hardness and effects from an existing GeoMod wall (map or placed).
+-- Copy settings from an existing GeoMod wall (map or placed).
 function TOOL:RightClick(trace)
     local ent = RFGeoMod.WallFor(trace.Entity)
     if not IsValid(ent) then return false end
     if CLIENT then return true end
     local ply = self:GetOwner()
     ply:ConCommand("rf_geomod_wall_hardness " .. math.Round(ent.Hardness or 50))
+    ply:ConCommand("rf_geomod_wall_weight_multiplier " .. RFGeoMod.ClampWeightMultiplier(ent.WeightMultiplier))
     local surface = safePath(ent.BoxSource and ent.SurfaceMaterialName or (ent.WallMaterialNames or {})[1])
     local cut = safePath(ent.CutMaterialName)
     if surface then ply:ConCommand("rf_geomod_wall_surface_material " .. surface) end
@@ -95,7 +98,7 @@ local openMaterialBrowser = include("rf_geomod/material_browser.lua")
 language.Add("tool.rf_geomod_wall.name", "GeoMod Wall")
 language.Add("tool.rf_geomod_wall.desc", "Place a destructible GeoMod wall that behaves like a physics prop")
 language.Add("tool.rf_geomod_wall.left", "Place a wall where the preview shows")
-language.Add("tool.rf_geomod_wall.right", "Copy materials, hardness and effects from a GeoMod wall")
+language.Add("tool.rf_geomod_wall.right", "Copy settings from a GeoMod wall")
 
 local previewMaterials = {}
 local function previewMaterial(path, ghost)
@@ -181,6 +184,8 @@ function TOOL.BuildCPanel(panel)
     panel:NumSlider("Height", "rf_geomod_wall_height", 8, 1024, 0)
     panel:NumSlider("Hardness", "rf_geomod_wall_hardness", 0, 100, 0)
     panel:ControlHelp("0 = soft rock. 50 = standard craters. 100 = hard concrete.")
+    local weight = RFGeoMod.WeightMultiplierLimits
+    panel:NumSlider("Weight multiplier", "rf_geomod_wall_weight_multiplier", weight[1], weight[2], 2)
     panel:CheckBox("Spawn frozen", "rf_geomod_wall_frozen")
     local effects = panel:ComboBox("Destruction effects", "rf_geomod_wall_effects_profile")
     for _, id in ipairs(table.GetKeys(RFGeoMod.GetEffectProfiles())) do

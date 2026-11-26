@@ -6,7 +6,45 @@ local SELECTED = Color(63, 97, 112)
 local BORDER = Color(126, 204, 223)
 local TEXT = Color(233, 237, 241)
 local MUTED = Color(174, 187, 198)
-local active, catalog
+local active, scan
+local catalog = {}
+
+local function scanMaterials(validPath)
+    local folders, knownFolders = {"materials"}, {materials = true}
+    local known = {}
+    local folderIndex = 1
+    local deadline = coroutine.yield()
+    local function checkpoint()
+        if SysTime() >= deadline then deadline = coroutine.yield() end
+    end
+    while folderIndex <= #folders do
+        local folder = folders[folderIndex]
+        local files, subfolders = file.Find(folder .. "/*", "GAME")
+        checkpoint()
+        local prefix = folder == "materials" and "" or folder:sub(11):lower() .. "/"
+        for _, fileName in ipairs(files or {}) do
+            local lowerName = fileName:lower()
+            if lowerName:sub(-4) == ".vmt" then
+                local path = validPath(prefix .. lowerName:sub(1, -5))
+                if path and not known[path] then
+                    known[path] = true
+                    catalog[#catalog + 1] = path
+                end
+            end
+            checkpoint()
+        end
+        for _, child in ipairs(subfolders or {}) do
+            local path = folder .. "/" .. child
+            local key = path:lower()
+            if child ~= "." and child ~= ".." and validPath(key:sub(11)) and not knownFolders[key] then
+                knownFolders[key] = true
+                folders[#folders + 1] = path
+            end
+            checkpoint()
+        end
+        folderIndex = folderIndex + 1
+    end
+end
 
 local function fitText(value, font, width)
     surface.SetFont(font)
@@ -90,11 +128,12 @@ return function(title, current, validPath, previewMaterial, applyMaterial)
     empty:Dock(FILL)
     empty:SetText("Indexing materials...")
 
-    local folders, knownFolders = {"materials"}, {materials = true}
-    local paths, known = catalog or {}, {}
-    local folderIndex = 1
-    local indexed = catalog ~= nil
-    local results, tiles = {}, {}
+    if not scan then
+        scan = coroutine.create(scanMaterials)
+        assert(coroutine.resume(scan, validPath))
+    end
+    local results = {}
+    local visibleTiles, freeTiles, previews = {}, {}, {}
     local selected = validPath(current:lower():gsub("^materials/", ""):gsub("%.vmt$", ""))
     if selected and not file.Exists("materials/" .. selected .. ".vmt", "GAME") then selected = nil end
     local function selectPath(path)
@@ -113,7 +152,7 @@ return function(title, current, validPath, previewMaterial, applyMaterial)
 
     local columns, tileWidth = 1, TILE_WIDTH
     local rowStep = TILE_HEIGHT + GAP
-    local previewFrame, previews = -1, 0
+    local previewFrame = -1
     local function paintTile(tile, w, h)
         local path = tile.Path
         if path == selected then
@@ -122,25 +161,24 @@ return function(title, current, validPath, previewMaterial, applyMaterial)
         else
             draw.RoundedBox(4, 0, 0, w, h, tile:IsHovered() and HOVER or TILE)
         end
-        if tile.Preview == nil then
-            local number = FrameNumber()
-            if number ~= previewFrame then previewFrame, previews = number, 0 end
-            if previews < 8 then
-                previews = previews + 1
-                tile.Preview = previewMaterial(path) or false
-                if tile.Preview then
-                    local width, height = math.max(1, tile.Preview:Width()), math.max(1, tile.Preview:Height())
-                    local scale = math.min((w - 14) / width, 86 / height)
-                    tile.ImageWidth, tile.ImageHeight = width * scale, height * scale
-                end
-            end
+        local preview = previews[path]
+        if preview == nil and FrameNumber() ~= previewFrame then
+            previewFrame = FrameNumber()
+            local material = previewMaterial(path)
+            preview = material and {
+                material = material,
+                width = math.max(1, material:Width()),
+                height = math.max(1, material:Height()),
+            } or false
+            previews[path] = preview
         end
-        if tile.Preview then
-            local iw, ih = tile.ImageWidth, tile.ImageHeight
-            surface.SetMaterial(tile.Preview)
+        if preview then
+            local scale = math.min((w - 14) / preview.width, 86 / preview.height)
+            local iw, ih = preview.width * scale, preview.height * scale
+            surface.SetMaterial(preview.material)
             surface.SetDrawColor(255, 255, 255)
             surface.DrawTexturedRect((w - iw) / 2, 6 + (86 - ih) / 2, iw, ih)
-        elseif tile.Preview == false then
+        elseif preview == false then
             draw.SimpleText("No preview", "DermaDefault", w / 2, 49, MUTED, TEXT_ALIGN_CENTER, TEXT_ALIGN_CENTER)
         end
         draw.SimpleText(tile.Caption, "DermaDefaultBold", w / 2, 98, TEXT, TEXT_ALIGN_CENTER)
@@ -150,41 +188,47 @@ return function(title, current, validPath, previewMaterial, applyMaterial)
     local function updateTiles()
         local scroll = math.floor(scrollbar:GetScroll())
         local height = canvas:GetTall()
-        local first = math.floor(scroll / rowStep)
-        local rows = math.ceil((height + scroll % rowStep) / rowStep)
-        local used = 0
-        for row = first, first + rows - 1 do
-            for col = 0, columns - 1 do
-                local path = results[row * columns + col + 1]
-                if path then
-                    used = used + 1
-                    local tile = tiles[used]
-                    if not IsValid(tile) then
-                        tile = vgui.Create("DButton", canvas)
-                        tile:SetName("MaterialTile")
-                        tile:SetText("")
-                        tile.Paint = paintTile
-                        tile.OnMouseWheeled = function(_, delta) return view:OnMouseWheeled(delta) end
-                        tile.DoClick = function(self) selectPath(self.Path) end
-                        tile.DoDoubleClick = function(self)
-                            selectPath(self.Path)
-                            use:DoClick()
-                        end
-                        tiles[used] = tile
-                    end
-                    if tile.Path ~= path or tile:GetWide() ~= tileWidth then
-                        tile.Path, tile.Preview = path, nil
-                        tile.Caption = fitText(string.GetFileFromFilename(path), "DermaDefaultBold", tileWidth - 12)
-                        tile.Folder = fitText(string.GetPathFromFilename(path), "DermaDefault", tileWidth - 12)
-                        tile:SetTooltip(path)
-                    end
-                    tile:SetSize(tileWidth, TILE_HEIGHT)
-                    tile:SetPos(GAP + col * (tileWidth + GAP), GAP + row * rowStep - scroll)
-                    tile:SetVisible(true)
-                end
+        local first = math.floor(scroll / rowStep) * columns + 1
+        local last = math.min(#results, math.ceil((scroll + height - GAP) / rowStep) * columns)
+        local nextTiles = {}
+        for i = first, last do
+            local path = results[i]
+            nextTiles[path] = visibleTiles[path] or false
+        end
+        for path, tile in pairs(visibleTiles) do
+            if nextTiles[path] == nil then
+                tile:SetVisible(false)
+                freeTiles[#freeTiles + 1] = tile
             end
         end
-        for i = used + 1, #tiles do tiles[i]:SetVisible(false) end
+        for i = first, last do
+            local path = results[i]
+            local tile = nextTiles[path] or table.remove(freeTiles)
+            if not tile then
+                tile = vgui.Create("DButton", canvas)
+                tile:SetName("MaterialTile")
+                tile:SetText("")
+                tile.Paint = paintTile
+                tile.OnMouseWheeled = function(_, delta) return view:OnMouseWheeled(delta) end
+                tile.DoClick = function(self) selectPath(self.Path) end
+                tile.DoDoubleClick = function(self)
+                    selectPath(self.Path)
+                    use:DoClick()
+                end
+            end
+            if tile.Path ~= path or tile:GetWide() ~= tileWidth then
+                tile.Path = path
+                tile.Caption = fitText(string.GetFileFromFilename(path), "DermaDefaultBold", tileWidth - 12)
+                tile.Folder = fitText(string.GetPathFromFilename(path), "DermaDefault", tileWidth - 12)
+                tile:SetTooltip(path)
+                tile:SetSize(tileWidth, TILE_HEIGHT)
+            end
+            local row, col = math.floor((i - 1) / columns), (i - 1) % columns
+            tile:SetPos(GAP + col * (tileWidth + GAP), GAP + row * rowStep - scroll)
+            if not tile:IsVisible() then tile:SetVisible(true) end
+            nextTiles[path] = tile
+        end
+        visibleTiles = nextTiles
     end
 
     function view:PerformLayout(w, h)
@@ -204,82 +248,74 @@ return function(title, current, validPath, previewMaterial, applyMaterial)
     end
     canvas.OnMouseWheeled = function(_, delta) return view:OnMouseWheeled(delta) end
 
-    local filterAt = indexed and 0
-    local function filter(resetScroll)
-        local terms = queryTerms(search:GetValue())
-        results = {}
-        for _, path in ipairs(paths) do
-            local match = true
-            for _, term in ipairs(terms) do
-                if not path:find(term, 1, true) then match = false break end
-            end
-            if match then results[#results + 1] = path end
-        end
-        status:SetText(string.format(indexed and "%d materials" or "%d found (scanning)", #results))
-        empty:SetText(not indexed and "Indexing materials..." or
-            (#paths == 0 and "No mounted materials found" or "No materials match the filter"))
+    local terms, cursor, filterAt = {}, 1, 0
+    local nextRefresh, shownCount, shownWorking = 0, -1, nil
+    local applySingle = false
+    local function refresh(working)
+        status:SetText(string.format(working and "%d found so far" or "%d materials", #results))
+        empty:SetText(working and "Searching materials..." or
+            (#catalog == 0 and "No mounted materials found" or "No materials match the filter"))
         empty:SetVisible(#results == 0)
-        if resetScroll then scrollbar:SetScroll(0) end
+        shownCount, shownWorking = #results, working
         view:InvalidateLayout(true)
     end
 
-    search.OnValueChange = function() filterAt = RealTime() + .12 end
+    search.OnValueChange = function()
+        applySingle = false
+        filterAt = RealTime() + .12
+    end
     clear.DoClick = function()
         search:SetText("")
         search:RequestFocus()
+        applySingle = false
         filterAt = 0
     end
     search.OnEnter = function()
-        if not indexed then return end
-        filterAt = nil
-        filter(true)
-        if #results == 1 then
-            selectPath(results[1])
-            use:DoClick()
-        end
+        applySingle = true
+        if filterAt then filterAt = 0 end
     end
 
-    local nextScanRefresh = 0
     function view:Think()
         local now = RealTime()
-        if not indexed then
-            local deadline = SysTime() + .005
-            repeat
-                local folder = folders[folderIndex]
-                local files, subfolders = file.Find(folder .. "/*", "GAME")
-                for _, child in ipairs(subfolders or {}) do
-                    local path = folder .. "/" .. child
-                    local key = path:lower()
-                    if child ~= "." and child ~= ".." and validPath(key:sub(11)) and not knownFolders[key] then
-                        knownFolders[key] = true
-                        folders[#folders + 1] = path
-                    end
+        if coroutine.status(scan) ~= "dead" then
+            assert(coroutine.resume(scan, SysTime() + .0015))
+        end
+        if filterAt then
+            if now < filterAt then return end
+            filterAt = nil
+            terms, cursor = queryTerms(search:GetValue()), 1
+            results = {}
+            scrollbar:SetScroll(0)
+            shownCount = -1
+            nextRefresh = 0
+        end
+        if #terms == 0 then
+            results, cursor = catalog, #catalog + 1
+        else
+            local deadline = SysTime() + .0005
+            local last = math.min(#catalog, cursor + 1023)
+            while cursor <= last do
+                local path = catalog[cursor]
+                local match = true
+                for _, term in ipairs(terms) do
+                    if not path:find(term, 1, true) then match = false break end
                 end
-                for _, fileName in ipairs(files or {}) do
-                    if fileName:lower():sub(-4) == ".vmt" then
-                        local path = validPath((folder:sub(11) .. "/" .. fileName:sub(1, -5)):gsub("^/", ""):lower())
-                        if path and not known[path] then
-                            known[path] = true
-                            paths[#paths + 1] = path
-                        end
-                    end
-                end
-                folderIndex = folderIndex + 1
-            until folderIndex > #folders or SysTime() >= deadline
-            if folderIndex > #folders then
-                indexed = true
-                folders, knownFolders, known = nil, nil, nil
-                table.sort(paths)
-                catalog = paths
-                filterAt = 0
-            elseif now >= nextScanRefresh and not filterAt then
-                nextScanRefresh = now + .3
-                filter(false)
+                if match then results[#results + 1] = path end
+                cursor = cursor + 1
+                if cursor % 64 == 0 and SysTime() >= deadline then break end
             end
         end
-        if filterAt and now >= filterAt then
-            filterAt = nil
-            filter(true)
+        local working = coroutine.status(scan) ~= "dead" or cursor <= #catalog
+        if now >= nextRefresh and (shownCount ~= #results or shownWorking ~= working) then
+            nextRefresh = now + .12
+            refresh(working)
+        end
+        if applySingle and not working then
+            applySingle = false
+            if #results == 1 then
+                selectPath(results[1])
+                use:DoClick()
+            end
         end
     end
 

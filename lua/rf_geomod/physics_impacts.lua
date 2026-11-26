@@ -124,12 +124,16 @@ function G.HandlePhysicsImpact(striker,data)
     -- collision callback. The cooldown also bounds multi-contact impacts.
     local source=-data.OurOldVelocity:GetNormalized()
     if selfImpact and not landing then outward,source=-outward,-source end
-    local impact={}
+    -- Keep the incoming trajectory for rock launch independently of the
+    -- fracture normal and the direction of the dust burst.
+    local impact={rockDirection=(data.OurOldVelocity-data.TheirOldVelocity):GetNormalized()}
     if selfImpact and landing then
         impact.landing=outward
         impact.velocity=data.OurOldVelocity
     elseif wall:GetClass()=='rf_geomod_dynamic' and striker:GetClass()=='prop_physics' then
-        impact={prop=striker,physics=physics,velocity=data.OurOldVelocity,point=data.HitPos,normal=outward,time=now}
+        impact.prop,impact.physics=striker,physics
+        impact.velocity,impact.point=data.OurOldVelocity,data.HitPos
+        impact.normal,impact.time=outward,now
     end
     if G.CutContact(wall,data.HitPos,outward,radius,source,impact) then
         striker.GeoModNextStrike=now+.1

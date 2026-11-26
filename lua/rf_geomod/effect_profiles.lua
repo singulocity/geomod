@@ -11,11 +11,6 @@ local stock={
     chip='effects/fleck_cement1',
     spark='effects/yellowflare',
     bubble='effects/bubble',
-    rock_sounds={
-        'physics/concrete/concrete_impact_hard1.wav',
-        'physics/concrete/concrete_impact_hard2.wav',
-        'physics/concrete/concrete_impact_hard3.wav',
-    },
 }
 profiles.stock=stock
 
@@ -44,6 +39,32 @@ function G.GetEffectProfile(id)
 end
 
 if SERVER then
+    local surfaces={}
+    local concrete=util.GetSurfaceIndex('concrete')
+    function G.MaterialPhysicsSurface(path)
+        path=path or ''
+        local surface=surfaces[path]
+        if not surface then
+            local material=path~='' and Material(path)
+            local name=material and not material:IsError() and material:GetString('$surfaceprop')
+            local index=name and util.GetSurfaceIndex(name) or -1
+            surface={
+                name=index>=0 and name or 'concrete',
+                data=util.GetSurfaceData(index>=0 and index or concrete),
+            }
+            surfaces[path]=surface
+        end
+        return surface.name,surface.data
+    end
+
+    function G.SurfaceImpactSound(surface,speed)
+        if not surface then return end
+        local preferred=speed>=200 and surface.impactHardSound or surface.impactSoftSound
+        if preferred and preferred~='' then return preferred end
+        local alternate=speed>=200 and surface.impactSoftSound or surface.impactHardSound
+        if alternate and alternate~='' then return alternate end
+    end
+
     local selection=CreateConVar('rf_geomod_effect_profile','stock',FCVAR_ARCHIVE,
         'Default profile for static GeoMod walls on maps without a geomod_effects entity.')
 
@@ -62,13 +83,13 @@ if SERVER then
         return G.MapEffectProfile()
     end
 
-    function G.RockImpactSound(id)
+    function G.RockImpactSound(id,surface,speed)
         local sounds=G.GetEffectProfile(id).rock_sounds
         if istable(sounds) and #sounds>0 then
             local path=sounds[math.random(#sounds)]
             if isstring(path) and file.Exists('sound/'..path,'GAME') then return path end
         end
-        return stock.rock_sounds[math.random(#stock.rock_sounds)]
+        return G.SurfaceImpactSound(surface or util.GetSurfaceData(concrete),speed or 200)
     end
 else
     function G.EffectMaterial(path)
