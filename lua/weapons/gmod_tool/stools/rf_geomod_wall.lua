@@ -41,7 +41,8 @@ end
 
 local function safePath(path)
     path = tostring(path or "")
-    return path ~= "" and #path <= 160 and path:match("^[%w_%-/%.]+$") and path or nil
+    return path ~= "" and #path <= 160 and not path:find("..", 1, true)
+        and path:match("^[%w_%-/%.]+$") and path or nil
 end
 
 function TOOL:LeftClick(trace)
@@ -84,7 +85,12 @@ function TOOL:RightClick(trace)
     return true
 end
 
-if SERVER then return end
+if SERVER then
+    AddCSLuaFile("rf_geomod/material_browser.lua")
+    return
+end
+
+local openMaterialBrowser = include("rf_geomod/material_browser.lua")
 
 language.Add("tool.rf_geomod_wall.name", "GeoMod Wall")
 language.Add("tool.rf_geomod_wall.desc", "Place a destructible GeoMod wall that behaves like a physics prop")
@@ -93,17 +99,19 @@ language.Add("tool.rf_geomod_wall.right", "Copy materials, hardness and effects 
 
 local previewMaterials = {}
 local function previewMaterial(path, ghost)
-    path = safePath(path) or RFGeoMod.DefaultSurfaceMaterial
-    if not file.Exists("materials/" .. path .. ".vmt", "GAME") then
+    path = safePath(path)
+    if ghost and (not path or not file.Exists("materials/" .. path .. ".vmt", "GAME")) then
         path = RFGeoMod.DefaultSurfaceMaterial
     end
+    if not path then return end
     local key = path .. (ghost and ":ghost" or ":icon")
-    if previewMaterials[key] then return previewMaterials[key] end
+    if previewMaterials[key] ~= nil then return previewMaterials[key] end
     local source = Material(path)
     local texture = not source:IsError() and source:GetTexture("$basetexture")
-    local base = texture and not texture:IsError() and texture:GetName() or "dev/dev_measurewall01a"
-    local params = {["$basetexture"] = base, ["$vertexcolor"] = "1"}
-    if ghost then params["$translucent"] = "1" params["$vertexalpha"] = "1" end
+    local base = texture and not texture:IsError() and texture:GetName()
+    if not base and not ghost then previewMaterials[key] = false return false end
+    local params = {["$basetexture"] = base or "dev/dev_measurewall01a", ["$vertexcolor"] = "1", ["$translucent"] = "1"}
+    if ghost then params["$vertexalpha"] = "1" end
     previewMaterials[key] = CreateMaterial("rf_geomod_wall_" .. (ghost and "ghost_" or "icon_") .. util.CRC(path), "UnlitGeneric", params)
     return previewMaterials[key]
 end
@@ -157,55 +165,9 @@ local function materialPicker(panel, label, convar)
     panel:TextEntry("Material path", convar)
     local button = panel:Button("Browse " .. string.lower(label))
     button.DoClick = function()
-        local frame = vgui.Create("DFrame")
-        frame:SetSize(math.min(760, ScrW() - 40), math.min(540, ScrH() - 40))
-        frame:SetTitle(label)
-        frame:SetSizable(true)
-        frame:Center()
-        frame:MakePopup()
-
-        local footer = vgui.Create("DPanel", frame)
-        footer:Dock(BOTTOM)
-        footer:SetTall(76)
-        local preview = vgui.Create("DImage", footer)
-        preview:Dock(LEFT)
-        preview:SetWide(76)
-        local use = vgui.Create("DButton", footer)
-        use:Dock(RIGHT)
-        use:SetWide(120)
-        use:SetText("Use material")
-        use:SetEnabled(false)
-        local selectedPath = vgui.Create("DLabel", footer)
-        selectedPath:Dock(FILL)
-        selectedPath:DockMargin(8, 0, 8, 0)
-        selectedPath:SetWrap(true)
-        selectedPath:SetDark(true)
-
-        local browser = vgui.Create("DFileBrowser", frame)
-        browser:Dock(FILL)
-        browser:SetPath("GAME")
-        browser:SetBaseFolder("materials")
-        browser:SetFileTypes("*.vmt")
-        browser:SetOpen(true)
-        local current = GetConVarString(convar)
-        browser:SetCurrentFolder(string.GetPathFromFilename(current):gsub("/$", ""))
-
-        local selected
-        function browser:OnSelect(path)
-            selected = safePath((path:gsub("^materials/", ""):gsub("%.vmt$", "")))
-            use:SetEnabled(selected ~= nil)
-            selectedPath:SetText(selected or "")
-            if selected then preview:SetMaterial(previewMaterial(selected, false)) end
-        end
-        use.DoClick = function()
-            if not selected then return end
-            RunConsoleCommand(convar, selected)
-            frame:Close()
-        end
-        function browser:OnDoubleClick(path)
-            self:OnSelect(path)
-            use:DoClick()
-        end
+        openMaterialBrowser(label, GetConVarString(convar), safePath, previewMaterial, function(path)
+            RunConsoleCommand(convar, path)
+        end)
     end
 end
 
