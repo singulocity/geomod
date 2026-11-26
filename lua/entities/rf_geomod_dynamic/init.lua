@@ -170,6 +170,12 @@ function ENT:QueueState()
 end
 
 function ENT:Think()
+    if self.GeoModImpactEjected then
+        local physics=self:GetPhysicsObject()
+        if IsValid(physics) and (physics:IsAsleep() or not physics:IsMotionEnabled()) then
+            self.GeoModImpactEjected=nil
+        end
+    end
     if self.ResetOnDrop and not self:IsPlayerHolding() then self:ResetWall() end
     if self.CutRequests then self:ScheduleCuts() end
     if self.StateDirty and CurTime()>=self.NextStateSend then self:SendState() end
@@ -503,8 +509,9 @@ function G.SpawnImpactChunks(wall,extracted,point,normal,radius,checkpoint)
             local offset=child:GetPos()-worldPoint
             local spread=(offset-outward*offset:Dot(outward))*(60/radius)
             local inherited=IsValid(parentPhysics) and parentPhysics:GetVelocityAtPoint(child:GetPos()) or Vector()
-            child.GeoModNextStrike=CurTime()+.14
-            child.GeoModNextImpact=CurTime()+.14
+            -- The launch is part of the original impact. Let overlapping
+            -- fragments collide and settle without generating more cuts.
+            child.GeoModImpactEjected=true
             physics:EnableMotion(true)
             physics:SetVelocity(inherited+outward*55+spread)
             physics:Wake()

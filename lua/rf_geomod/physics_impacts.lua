@@ -14,7 +14,7 @@ local function weakenedAt(wall,point)
 end
 
 function G.HandlePhysicsImpact(striker,data)
-    if not enabled:GetBool() then return end
+    if not enabled:GetBool() or striker.GeoModImpactEjected then return end
     local wall=G.ContactWall(data.HitEntity)
     local normal=data.HitNormal
     local approach=data.OurOldVelocity:Dot(normal)
@@ -25,7 +25,7 @@ function G.HandlePhysicsImpact(striker,data)
         and (data.HitEntity==game.GetWorld() or IsValid(data.HitObject) and not data.HitObject:IsMotionEnabled())
     local selfImpact=not IsValid(wall) and (striker.IsChunk or landing)
     if selfImpact then wall=striker end
-    if not IsValid(wall) or (wall==striker and not selfImpact) then return end
+    if not IsValid(wall) or wall.GeoModImpactEjected or (wall==striker and not selfImpact) then return end
     local now=CurTime()
     if now<(striker.GeoModNextStrike or 0) or now<(wall.GeoModNextImpact or 0) then return end
 
@@ -57,6 +57,10 @@ function G.HandlePhysicsImpact(striker,data)
         wall.GeoModNextImpact=now+.14
     end
 end
+
+hook.Add('PhysgunDrop','rf_geomod_rearm_impact',function(_,ent)
+    if IsValid(ent) then ent.GeoModImpactEjected=nil end
+end)
 
 local function register(ent)
     if not IsValid(ent) then return end
